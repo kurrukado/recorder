@@ -1,9 +1,8 @@
-# TikTok 24/7 Auto Recorder (Cloud Multi-Stream Engine)
+# TikTok 24/7 Auto Recorder
 
-An automated 24/7 TikTok Live recording system running **100% in the cloud (GitHub Actions + Supabase + Google Drive + Vercel)** — **no local PC required**.
 
 > [!IMPORTANT]
-> **Runs 24/7 even when your personal computer is turned off.**
+> This was completely made by AI so it will cause unexpected bugs but i will commit fixes if its happen, it may takes times
 > Streamer monitoring, live detection (< 20s), H.264 stream capture, Google Drive storage, Supabase sync, and web dashboard management run completely autonomously on cloud runners.
 
 ---
@@ -65,8 +64,6 @@ Fetch video entries directly from the `tiktok_recordings` table:
 ---
 
 ## 🧪 Local Testing & Debugging (Optional)
-
-> *You do not need to run local commands for regular operation; the system runs 24/7 on GitHub Actions.*
 
 ```bash
 # Install dependencies
