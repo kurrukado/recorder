@@ -1,66 +1,54 @@
 # TikTok 24/7 Auto Recorder (Cloud Multi-Stream Engine)
 
-Hệ thống ghi hình tự động TikTok Live 24/7 vận hành **100% trên đám mây (GitHub Actions + Supabase + Google Drive + Vercel)** — **HOÀN TOÀN TỰ ĐỘNG, KHÔNG CẦN MỞ MÁY TÍNH CÁ NHÂN**.
+An automated 24/7 TikTok Live recording system running **100% in the cloud (GitHub Actions + Supabase + Google Drive + Vercel)** — **no local PC required**.
 
 > [!IMPORTANT]
-> **TẮT MÁY TÍNH CÁ NHÂN HỆ THỐNG VẪN CHẠY 24/7 LIÊN TỤC!**
-> Quá trình theo dõi streamer, phát hiện live sau 20s, thu luồng H.264, lưu Google Drive 5TB, đồng bộ Supabase và điều khiển qua Web hoàn toàn chạy độc lập trên đám mây. Bạn có thể tắt máy tính đi ngủ thoải mái.
+> **Runs 24/7 even when your personal computer is turned off.**
+> Streamer monitoring, live detection (< 20s), H.264 stream capture, Google Drive storage, Supabase sync, and web dashboard management run completely autonomously on cloud runners.
 
 ---
 
-## 🚀 Tính năng Nổi bật
+## 🚀 Key Features
 
-* ☁️ **Vận Hành 100% Đám Mây 24/7 (Không Phụ Thuộc Máy Local):**
-  - Chạy liên tục trên GitHub Actions với cơ chế Continuous Relay kết hợp lưới an toàn Cron (`*/50 * * * *`).
-  - Hỗ trợ ghi đồng thời lên đến **10 streamer cùng lúc**.
-  - Hoàn toàn miễn phí, không giới hạn số phút (Unlimited Minutes trên Public Repository).
-* ⚡ **Serverless Cloud Failover 24/7 Trên Web:**
-  - Web API (Vercel) tự động chuyển mạch trong 0.05 giây sang Supabase Cloud khi máy tính cá nhân tắt, đảm bảo trạng thái Web luôn trực tuyến (Online) 24/7.
-* 🗑️ **Dọn Sạch 100% Cover Thumbnail Supabase Storage:**
-  - Xóa streamer: Tự động dọn sạch thư mục ảnh `record-thumbnails/{user}/` trong bucket `covers` trên Supabase Storage cùng với dữ liệu database.
-  - Xóa video: Tự động xóa file `.jpg` thumbnail tương ứng trong bucket `covers` song song với việc xóa file trên Google Drive.
-* 📦 **Zero-Loss Staging Queue:**
-  - Tự động chia nhỏ video thành các phân đoạn ngắn tải lên Google Drive Staging Queue để chống mất mát dữ liệu khi streamer ngắt kết nối đột ngột hoặc runner hết giờ.
-  - Tự động ghép nối video hoàn chỉnh và upload thumbnail khi kết thúc live.
-* 🛡️ **Chuẩn hóa H.264 & Chống Lỗi Bitstream:**
-  - Ưu tiên luồng HLS H.264 MPEG-TS, loại bỏ nguy cơ lỗi header NAL Unit FLV (`01 64 00 1f...`).
-  - Tự động gắn cờ `+faststart` (moov box ở đầu file) để trình duyệt web phát ngay lập tức.
-* 🩺 **Tự Phục hồi (Self-Healing Watchdog):**
-  - Workflow chạy định kỳ mỗi 6 giờ (`0 */6 * * *`) tự động vá lỗi bitstream và bù thumbnail vào Supabase Storage nếu có phiên bị gián đoạn.
-* 🌐 **Tích hợp Supabase & Web API:**
-  - Đồng bộ danh sách theo dõi qua bảng `tiktok_streamers`.
-  - Lưu trữ thông tin video và link thumbnail công khai qua bảng `tiktok_recordings`.
+* ☁️ **100% Cloud-Native 24/7 Operation:** Runs continuously via GitHub Actions Continuous Relay and fallback cron (`*/50 * * * *`). Supports recording up to **10 concurrent streamers** for free (unlimited runner minutes on public repositories).
+* ⚡ **Instant Web Failover & Realtime Sync:** Web API automatically switches to Supabase Cloud in < 50ms when local instances are offline. Realtime WebSocket events push live/recording status changes to the frontend in < 100ms.
+* 🗑️ **Full Storage Cleanup:** Deleting a streamer purges all records and thumbnails in `covers/record-thumbnails/{user}/` on Supabase Storage. Deleting a video removes both the Google Drive file and its Supabase thumbnail.
+* 📦 **Zero-Loss Staging Queue:** Automatically splits active streams into safe segments and stores them in Google Drive staging queues to prevent data loss on sudden disconnects or runner rotation. Merges into final MP4 when the live ends.
+* 🛡️ **H.264 Normalization & Bitstream Repair:** Prioritizes HLS H.264 MPEG-TS streams to eliminate NAL unit / FLV header errors. Automatically flags `+faststart` (moov atom at file start) for instant browser playback.
+* 🎙️ **Audio-Only / Voice Live Support:** Automatically synthesizes a lightweight static H.264 video frame (1 fps) for voice/radio streams so the audio is preserved and playable on Google Drive and HTML5 video players.
+* 🩺 **Self-Healing Watchdog:** Recurring watchdog workflow (`0 */6 * * *`) repairs bitstreams and restores missing thumbnails in Supabase Storage.
+* 🌐 **Full Supabase & Web API Integration:** Live list synchronization via `tiktok_streamers` and recording metadata/CDN links via `tiktok_recordings`.
 
 ---
 
-## ⚙️ Hướng dẫn Cài đặt GitHub Secrets (Bắt buộc)
+## ⚙️ GitHub Secrets Setup (Required)
 
-Sau khi tạo repository công khai (Public) trên GitHub, vào **Settings $\to$ Secrets and variables $\to$ Actions $\to$ New repository secret**, thêm các biến sau:
+In your GitHub repository, go to **Settings → Secrets and variables → Actions → New repository secret** and add:
 
-| Secret Name | Mô tả |
-| :--- | :--- |
-| `GOOGLE_CLIENT_ID` | Client ID ứng dụng Google Cloud (Google Drive API) |
-| `GOOGLE_CLIENT_SECRET` | Client Secret ứng dụng Google Cloud |
-| `GDRIVE_REFRESH_TOKEN` | OAuth2 Refresh Token Google Drive |
-| `SUPABASE_URL` | URL dự án Supabase (VD: `https://xxxx.supabase.co`) |
-| `SUPABASE_KEY` | Supabase Anon Key hoặc Service Role Key |
-| `WORKFLOW_PAT` | *(Tùy chọn)* GitHub Personal Access Token có quyền `repo`/`workflow` để kích hoạt phiên nối tiếp ngay lập tức |
-| `TIKTOK_SESSION_ID` | *(Tùy chọn)* Giá trị cookie `sessionid_ss` khi cần ghi hình phòng live giới hạn độ tuổi |
-| `TELEGRAM_BOT_TOKEN` | *(Tùy chọn)* Token bot Telegram gửi thông báo |
-| `TELEGRAM_CHAT_ID` | *(Tùy chọn)* Chat ID nhận thông báo Telegram |
+| Secret Name | Description | Required |
+| :--- | :--- | :--- |
+| `GOOGLE_CLIENT_ID` | Google Cloud OAuth2 Client ID (Drive API) | Yes |
+| `GOOGLE_CLIENT_SECRET` | Google Cloud OAuth2 Client Secret | Yes |
+| `GDRIVE_REFRESH_TOKEN` | Google Drive OAuth2 Refresh Token | Yes |
+| `SUPABASE_URL` | Supabase Project URL (`https://xxxx.supabase.co`) | Yes |
+| `SUPABASE_KEY` | Supabase Anon Key or Service Role Key | Yes |
+| `WORKFLOW_PAT` | *(Optional)* GitHub Personal Access Token (`repo`/`workflow`) for instant relay | Optional |
+| `TIKTOK_SESSION_ID` | *(Optional)* TikTok `sessionid_ss` cookie for 18+ age-restricted streams | Optional |
+| `TELEGRAM_BOT_TOKEN` | *(Optional)* Telegram bot token for instant live alerts | Optional |
+| `TELEGRAM_CHAT_ID` | *(Optional)* Telegram chat ID to receive notifications | Optional |
 
 ---
 
-## 🌐 Tích hợp Web & Gọi API từ Website
+## 🌐 Web & API Integration
 
-### 1. Quản lý Streamer (Không cần qua server trung gian)
-Website của bạn có thể thêm/xóa streamer trực tiếp thông qua **Supabase PostgREST API** hoặc Supabase Client:
-* **Thêm streamer:** `POST /rest/v1/tiktok_streamers` với payload `{"username": "ten_streamer"}`.
-* **Xóa streamer:** `DELETE /rest/v1/tiktok_streamers?username=eq.ten_streamer`.
-* **Runner sẽ tự động đọc danh sách streamer mới nhất từ Supabase mỗi 20 giây!**
+### 1. Streamer Management (Direct via Supabase)
+Add or remove monitored streamers directly through Supabase PostgREST API or Supabase client without an intermediary server:
+* **Add Streamer:** `POST /rest/v1/tiktok_streamers` with `{"username": "streamer_name"}`.
+* **Remove Streamer:** `DELETE /rest/v1/tiktok_streamers?username=eq.streamer_name`.
+* *Cloud runners reload the monitored list from Supabase every 15–20 seconds.*
 
-### 2. Kích hoạt Runner thủ công từ Website
-Khi cần kích hoạt ghi hình tức thì từ website, gửi request đến GitHub Actions Dispatch API:
+### 2. Manual Runner Dispatch
+Trigger an immediate recording run via GitHub Actions Dispatch API:
 ```bash
 POST https://api.github.com/repos/{OWNER}/{REPO}/actions/workflows/recorder.yml/dispatches
 Authorization: Bearer <GITHUB_PAT>
@@ -69,24 +57,24 @@ Content-Type: application/json
 {"ref": "main"}
 ```
 
-### 3. Hiển thị Video trên Web
-Website chỉ cần đọc bảng `tiktok_recordings` từ Supabase:
-* `thumbnail_url`: Link ảnh đại diện từ Supabase Storage.
-* `drive_file_id`: ID file trên Google Drive để phát video HTML5 hoặc nhúng iframe player.
+### 3. Display Recordings on Web
+Fetch video entries directly from the `tiktok_recordings` table:
+* `thumbnail_url`: Public thumbnail image on Supabase Storage.
+* `drive_file_id`: Google Drive file ID for HTML5 video playback and direct CDN download.
 
 ---
 
-## 🧪 Kiểm thử Cục bộ (Tùy chọn dành cho Lập trình / Debug)
+## 🧪 Local Testing & Debugging (Optional)
 
-> *Lưu ý: Bạn không cần chạy các lệnh này nếu chỉ muốn sử dụng hệ thống. Hệ thống đã tự động chạy 24/7 trên GitHub Actions.*
+> *You do not need to run local commands for regular operation; the system runs 24/7 on GitHub Actions.*
 
 ```bash
-# Cài đặt thư viện
+# Install dependencies
 pip install -r requirements.txt
 
-# Chạy bộ kiểm thử toàn diện (78 bài test đạt chuẩn)
+# Run comprehensive test suite (78 tests)
 python -B -m unittest test_audit_suite.py
 
-# (Tùy chọn) Chạy thử daemon ghi hình tại máy cá nhân với GPU NVENC
+# (Optional) Run recording daemon locally with GPU NVENC
 run_cloud_daemon.bat
 ```
