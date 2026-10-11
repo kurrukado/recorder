@@ -578,14 +578,34 @@ def get_users(check_live: bool = True, fresh: bool = False):
         active_users.update(active_keys)
         
         # Tự động nạp cache từ Supabase:
-        # Chỉ nạp avatar_thumb & nickname để làm giàu dữ liệu hiển thị hoặc offline status.
-        # KHÔNG nạp is_live=True mù quáng vào LIVE_CACHE để tránh tạo vòng lặp ma (Zombie Loop)
         if supa_streamers_map:
             with LIVE_CACHE_LOCK:
                 now_ts = time.time()
                 for su, s_data in supa_streamers_map.items():
                     cached_val = LIVE_CACHE.get(su)
-                    if cached_val:
+                    # Kiểm tra xem bản ghi Supabase có tươi mới (< 180s) không
+                    up_str = s_data.get("updated_at")
+                    is_supa_fresh = False
+                    if up_str:
+                        try:
+                            from datetime import datetime, timezone
+                            dt = datetime.fromisoformat(str(up_str).replace("Z", "+00:00"))
+                            is_supa_fresh = (datetime.now(timezone.utc) - dt).total_seconds() < 180
+                        except Exception:
+                            is_supa_fresh = False
+
+                    # Nếu Cloud Runner đang ghi hình hoặc báo live tươi mới, lập tức cập nhật LIVE_CACHE
+                    if is_supa_fresh and (s_data.get("is_recording") or s_data.get("is_live")):
+                        LIVE_CACHE[su] = {
+                            "is_live": True,
+                            "room_id": s_data.get("room_id"),
+                            "is_sub_only": False,
+                            "is_preview": False,
+                            "avatar_thumb": s_data.get("avatar_thumb") or (cached_val.get("avatar_thumb") if cached_val else None),
+                            "nickname": s_data.get("nickname") or (cached_val.get("nickname") if cached_val else None),
+                            "timestamp": now_ts,
+                        }
+                    elif cached_val:
                         if not cached_val.get("avatar_thumb") and s_data.get("avatar_thumb"):
                             cached_val["avatar_thumb"] = s_data.get("avatar_thumb")
                         if not cached_val.get("nickname") and s_data.get("nickname"):
@@ -602,15 +622,26 @@ def get_users(check_live: bool = True, fresh: bool = False):
                         }
 
         # Probe live status: Khi fresh=True, probe toàn bộ streamer.
-        # Khi fresh=False, chỉ probe các streamer chưa có trong cache để tránh làm nghẽn máy chủ
+        # Khi fresh=False, chỉ probe các streamer chưa có trong cache hoặc cache đã hết hạn TTL
         local_rec_users = set()
         with RECORDING_LOCK:
             local_rec_users.update(ACTIVE_RECORDING_TASKS.keys())
+        now_ts = time.time()
         if fresh:
             users_to_probe = list(users)
         else:
             with LIVE_CACHE_LOCK:
-                users_to_probe = [u for u in users if (u not in LIVE_CACHE and u not in local_rec_users)]
+                users_to_probe = []
+                for u in users:
+                    if u in local_rec_users or u in active_users:
+                        continue
+                    cached = LIVE_CACHE.get(u)
+                    if not cached:
+                        users_to_probe.append(u)
+                    else:
+                        ttl = LIVE_CACHE_TTL if cached.get("is_live") else LIVE_CACHE_OFFLINE_TTL
+                        if (now_ts - cached.get("timestamp", 0) >= ttl):
+                            users_to_probe.append(u)
         live_statuses = {}
         if check_live and users_to_probe:
             with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(users_to_probe), 8)) as executor:
@@ -664,26 +695,22 @@ def get_users(check_live: bool = True, fresh: bool = False):
                     except Exception:
                         sd_live = False
 
-            # Streamer offline trên TikTok và không có recorder cục bộ -> dứt khoát offline
-            if not is_local_recorder_running_for_user(u) and det and not det.get("is_live", False):
-                is_recording = False
-                is_live = False
+            if is_recording:
+                status_str = "recording"
+                is_live = True
+            elif det.get("is_live", False) or sd_live:
+                status_str = "live"
+                is_live = True
             else:
-                is_live = det.get("is_live", False) or is_recording or sd_live
+                status_str = "offline"
+                is_live = False
+                is_recording = False
 
             room_id = det.get("room_id") or sd.get("room_id")
             avatar_thumb = det.get("avatar_thumb") or sd.get("avatar_thumb")
             nickname = det.get("nickname") or sd.get("nickname")
             is_sub_only = det.get("is_sub_only", False) or sd.get("is_sub_only", False)
             is_preview = det.get("is_preview", False) or sd.get("is_preview", False)
-
-            if is_recording:
-                status_str = "recording"
-                is_live = True
-            elif is_live:
-                status_str = "live"
-            else:
-                status_str = "offline"
 
             result.append({
                 "username": u,
