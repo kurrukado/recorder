@@ -108,11 +108,49 @@ def get_audio_codec(filepath):
         pass
     return "none"
 
+def convert_audio_only_to_video(filepath: str) -> Optional[str]:
+    """
+    Khi phiên live là Live âm thanh (Voice Live / Podcast không bật camera)
+    hoặc luồng thu chỉ có Audio:
+    Tự động gắn luồng video tĩnh 720x1280 (1 fps) để file trở thành MP4 chuẩn H.264,
+    phát được trên Google Drive & Web video player mà không làm mất bản ghi âm live của streamer!
+    """
+    if not filepath or not os.path.exists(filepath):
+        return None
+    tmp_out = filepath + ".with_video.mp4"
+    cmd = [
+        FFMPEG_PATH, "-y",
+        "-f", "lavfi", "-i", "color=c=0x18181b:s=720x1280:r=1",
+        "-i", filepath,
+        "-c:v", "libx264", "-preset", "ultrafast", "-tune", "stillimage",
+        "-c:a", "copy",
+        "-shortest",
+        tmp_out
+    ]
+    try:
+        p = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+        if p.returncode == 0 and os.path.exists(tmp_out) and os.path.getsize(tmp_out) > 1024:
+            try:
+                os.replace(tmp_out, filepath)
+                print(f"[auto_h264] [🎙️ Live âm thanh] Đã tự động tạo luồng hình ảnh H.264 tĩnh cho {os.path.basename(filepath)} để phát được trên Web và Google Drive!")
+                return filepath
+            except Exception:
+                if os.path.exists(tmp_out):
+                    try: os.remove(tmp_out)
+                    except Exception: pass
+    except Exception as e:
+        print(f"[auto_h264] Lỗi tổng hợp video cho luồng audio: {e}")
+        if os.path.exists(tmp_out):
+            try: os.remove(tmp_out)
+            except Exception: pass
+    return None
+
 def validate_playable_video(filepath, min_duration=5.0, min_size_bytes=250000):
     """
     Kiểm tra tính toàn vẹn và khả năng phát thực tế của file video:
     1. File tồn tại và dung lượng >= min_size_bytes (mặc định 250 KB, loại trừ rác container).
     2. Phải có ít nhất 1 luồng Video ('Video:'), loại trừ các file chỉ có Audio.
+       (Tự động tổng hợp video tĩnh nếu phát hiện file chỉ có audio của Live âm thanh).
     3. Thời lượng video >= min_duration giây, loại trừ các đoạn thu ngắn ngủi lỗi 0:00s.
     Returns (is_valid: bool, reason: str, duration: float)
     """
@@ -145,13 +183,30 @@ def validate_playable_video(filepath, min_duration=5.0, min_size_bytes=250000):
         return True, "Không chẩn đoán được (probe timeout) - giữ file để tránh xóa nhầm", 0.0
 
     has_video = False
+    has_audio = False
     for line in out.splitlines():
         if "Video:" in line:
             has_video = True
-            break
+        if "Audio:" in line:
+            has_audio = True
 
     if not has_video:
-        return False, "Không tìm thấy luồng hình ảnh (Video Stream) trong file (chỉ có Audio hoặc rỗng)", 0.0
+        if has_audio:
+            # File chỉ có audio (Live âm thanh / Voice Live / Podcast không bật camera).
+            # Tự động gắn luồng video tĩnh 720x1280 (1 fps) để file trở thành MP4 hoàn chỉnh.
+            fixed_path = convert_audio_only_to_video(filepath)
+            if fixed_path and os.path.exists(fixed_path):
+                try:
+                    re_p = subprocess.run([FFMPEG_PATH, "-i", filepath], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", timeout=10)
+                    out = re_p.stderr
+                    for line in out.splitlines():
+                        if "Video:" in line:
+                            has_video = True
+                            break
+                except Exception:
+                    pass
+        if not has_video:
+            return False, "Không tìm thấy luồng hình ảnh lẫn âm thanh trong file (chỉ có Audio hoặc rỗng)", 0.0
 
     import re
     m = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.?\d*)", out)

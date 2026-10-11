@@ -572,14 +572,34 @@ def classify_stream_urls(raw_urls: list) -> list:
     """
     if not raw_urls:
         return []
-    clean = [u.replace('&amp;', '&') for u in raw_urls if "only_audio=1" not in u and "stream_suffix=ao" not in u]
+
+    def is_audio_only_url(u: str) -> bool:
+        u_lower = str(u).lower()
+        return (
+            "only_audio=1" in u_lower or
+            "audio_only=1" in u_lower or
+            "stream_suffix=ao" in u_lower or
+            'stream_suffix":"ao"' in u_lower or
+            "suffix=ao" in u_lower or
+            "_ao." in u_lower or
+            "_ao?" in u_lower or
+            "_ao/" in u_lower or
+            "-ao." in u_lower or
+            "-ao?" in u_lower or
+            "/ao." in u_lower or
+            "/ao/" in u_lower
+        )
+
+    clean_video = [u.replace('&amp;', '&') for u in raw_urls if not is_audio_only_url(u)]
+    clean_audio = [u.replace('&amp;', '&') for u in raw_urls if is_audio_only_url(u)]
+
     p1080_flv, p1080_hls = [], []
     p720_flv, p720_hls = [], []
     psd_flv, psd_hls = [], []
     pld_flv, pld_hls = [], []
     other_flv, other_hls = [], []
 
-    for u in clean:
+    for u in clean_video:
         u_lower = u.lower()
         is_flv = ".flv" in u_lower
 
@@ -602,12 +622,14 @@ def classify_stream_urls(raw_urls: list) -> list:
             (other_flv if is_flv else other_hls).append(u)
 
     # Ưu tiên HLS trước FLV cùng quality tier để tránh FLV AVCC/NAL corruption.
+    # Luồng audio-only (clean_audio) được xếp cuối cùng chỉ làm fallback khi phòng live là Voice Live (không camera).
     return (
         p1080_hls + p1080_flv +
         p720_hls + p720_flv +
         other_hls + other_flv +
         psd_hls + psd_flv +
-        pld_hls + pld_flv
+        pld_hls + pld_flv +
+        clean_audio
     )
 
 def parse_sdk_stream_data(sdk_data_str: str) -> list:
@@ -1047,7 +1069,7 @@ def record_stream_ffmpeg(stream_url, output_filename=None, target_user="islizanx
             "Referer: https://www.tiktok.com/\r\n"
         ),
         "-i", stream_url,
-        "-map", "0:v:0",
+        "-map", "0:v:0?",
         "-map", "0:a:0?",
         "-c:v", "copy",
         "-c:a", "copy",
