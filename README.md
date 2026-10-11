@@ -1,14 +1,12 @@
 # TikTok 24/7 Auto Recorder
 
-
 > [!IMPORTANT]
 > This was completely made by AI so it will cause unexpected bugs but i will commit fixes if its happen, it may takes times
-> Streamer monitoring, live detection (< 20s), H.264 stream capture, Google Drive storage, Supabase sync, and web dashboard management run completely autonomously on cloud runners.
 
 ---
 
 ## 🚀 Key Features
-
+* Streamer monitoring, live detection (< 20s), H.264 stream capture, Google Drive storage, Supabase sync, and web dashboard management
 * ☁️ **100% Cloud-Native 24/7 Operation:** Runs continuously via GitHub Actions Continuous Relay and fallback cron (`*/50 * * * *`). Supports recording up to **10 concurrent streamers** for free (unlimited runner minutes on public repositories).
 * ⚡ **Instant Web Failover & Realtime Sync:** Web API automatically switches to Supabase Cloud in < 50ms when local instances are offline. Realtime WebSocket events push live/recording status changes to the frontend in < 100ms.
 * 🗑️ **Full Storage Cleanup:** Deleting a streamer purges all records and thumbnails in `covers/record-thumbnails/{user}/` on Supabase Storage. Deleting a video removes both the Google Drive file and its Supabase thumbnail.
