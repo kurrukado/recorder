@@ -5,6 +5,7 @@ import shutil
 import time
 import struct
 import re
+from typing import Optional, Tuple
 
 if sys.platform == "win32":
     try:
