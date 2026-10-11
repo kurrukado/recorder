@@ -258,11 +258,15 @@ def streamer_recording_worker(user, initial_room_id, auto_discover=True, stop_ev
     guest_session = None
     consecutive_failures = 0
     max_consecutive_failures = 8
+    record_counter = 0
 
     # Kiểm tra xem buổi live có phải VIP Sub-only không qua check_live_details
     live_details = recorder_core.check_live_details(user)
     if live_details.get("room_id"):
         current_room_id = live_details.get("room_id")
+    current_avatar = live_details.get("avatar_thumb")
+    if current_avatar:
+        log(f"👤 [@{user}] Tự động cập nhật ảnh đại diện mới nhất khi lên sóng live: {current_avatar[:70]}...")
     try:
         supabase_sync.update_streamer_status_supabase(
             user,
@@ -270,7 +274,7 @@ def streamer_recording_worker(user, initial_room_id, auto_discover=True, stop_ev
             is_recording=True,
             room_id=current_room_id,
             nickname=live_details.get("nickname"),
-            avatar_thumb=live_details.get("avatar_thumb"),
+            avatar_thumb=current_avatar,
             status="recording"
         )
     except Exception:
@@ -414,7 +418,24 @@ def streamer_recording_worker(user, initial_room_id, auto_discover=True, stop_ev
                     consecutive_failures = 0
                     part_segments.append(rec_result)
                     accumulated_seconds += v_dur
+                    record_counter += 1
                     log(f"[✓] [@{user}] Thu đoạn {len(part_segments)} ({v_dur:.1f}s). Tích lũy Phần {part_number}: {accumulated_seconds:.1f}s / {MAX_CHUNK_SECONDS}s")
+
+                    # Mỗi 2 lần thu (record) tự động kiểm tra avatar xem streamer có thay đổi ảnh đại diện không
+                    if record_counter % 2 == 0:
+                        try:
+                            fresh_avatar_det = recorder_core.check_live_details(user)
+                            new_avatar = fresh_avatar_det.get("avatar_thumb")
+                            if new_avatar and new_avatar != current_avatar:
+                                log(f"🔄 [@{user}] Phát hiện thay đổi ảnh đại diện mới khi live (lần thu #{record_counter})! Cập nhật avatar mới vào hệ thống...")
+                                current_avatar = new_avatar
+                                supabase_sync.update_streamer_status_supabase(
+                                    user,
+                                    avatar_thumb=new_avatar,
+                                    nickname=fresh_avatar_det.get("nickname")
+                                )
+                        except Exception as av_err:
+                            log(f"[!] [@{user}] Lỗi kiểm tra thay đổi avatar: {av_err}")
                 else:
                     consecutive_failures += 1
                     log(f"[!] [@{user}] Phân đoạn {len(part_segments)+1} không đạt chuẩn ({v_reason}).")
@@ -913,14 +934,37 @@ def run_daemon(max_minutes=210, interval=25, auto_discover=True):
 
             def _check(u):
                 try:
-                    return u, recorder_core.check_user_live(u)
+                    res = recorder_core.check_live_details(u)
+                    if isinstance(res, dict):
+                        return u, res
+                    elif isinstance(res, (tuple, list)):
+                        return u, {"is_live": bool(res[0]), "room_id": res[1] if len(res) > 1 else None, "is_account_deleted": False}
+                    return u, {"is_live": False, "room_id": None, "is_account_deleted": False}
                 except Exception:
-                    return u, (False, None)
+                    return u, {"is_live": False, "room_id": None, "is_account_deleted": False}
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(users_to_check), 6)) as executor:
                 check_results = list(executor.map(_check, users_to_check))
 
-            for user, (is_live, room_id) in check_results:
+            for user, det in check_results:
+                if not isinstance(det, dict):
+                    continue
+                if det.get("is_account_deleted"):
+                    log(f"⚠️ [@{user}] Phát hiện tài khoản TikTok đã bị xóa / không tồn tại. Đánh dấu 'deleted' trên Supabase...")
+                    try:
+                        supabase_sync.update_streamer_status_supabase(
+                            user,
+                            is_account_deleted=True,
+                            status="deleted",
+                            is_live=False,
+                            is_recording=False
+                        )
+                    except Exception:
+                        pass
+                    continue
+
+                is_live = det.get("is_live", False)
+                room_id = det.get("room_id")
                 if not (is_live and room_id):
                     continue
 

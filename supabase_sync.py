@@ -82,6 +82,7 @@ def fetch_streamers_details_from_supabase() -> list:
                                 "nickname": d.get("nickname") or None,
                                 "avatar_thumb": d.get("avatar_thumb") or None,
                                 "status": d.get("status") or ("recording" if d.get("is_recording") else ("live" if d.get("is_live") else "offline")),
+                                "is_account_deleted": bool(d.get("is_account_deleted") or d.get("status") == "deleted"),
                                 "last_live_at": d.get("last_live_at") or None,
                                 "updated_at": d.get("updated_at") or None,
                             })
@@ -92,20 +93,29 @@ def fetch_streamers_details_from_supabase() -> list:
 
 def update_streamer_status_supabase(user: str, is_live: Optional[bool] = None, is_recording: Optional[bool] = None,
                                    room_id: Optional[str] = None, nickname: Optional[str] = None,
-                                   avatar_thumb: Optional[str] = None, status: Optional[str] = None) -> bool:
+                                   avatar_thumb: Optional[str] = None, status: Optional[str] = None,
+                                   is_account_deleted: Optional[bool] = None) -> bool:
     """Cập nhật trạng thái trực tiếp của streamer vào Supabase DB."""
     try:
         user = user.strip().replace("@", "").lower()
         if not user:
             return False
         payload = {"updated_at": datetime.now(timezone.utc).isoformat()}
-        if is_live is not None:
+        if is_account_deleted is not None:
+            payload["is_account_deleted"] = bool(is_account_deleted)
+            if is_account_deleted:
+                payload["status"] = "deleted"
+                payload["is_live"] = False
+                payload["is_recording"] = False
+                payload["room_id"] = None
+
+        if is_live is not None and not is_account_deleted:
             payload["is_live"] = is_live
             if is_live:
                 payload["last_live_at"] = payload["updated_at"]
-        if is_recording is not None:
+        if is_recording is not None and not is_account_deleted:
             payload["is_recording"] = is_recording
-        if room_id is not None:
+        if room_id is not None and not is_account_deleted:
             payload["room_id"] = str(room_id) if room_id else None
         if nickname is not None:
             payload["nickname"] = nickname
@@ -113,12 +123,13 @@ def update_streamer_status_supabase(user: str, is_live: Optional[bool] = None, i
             payload["avatar_thumb"] = avatar_thumb
         if status is not None:
             payload["status"] = status
-        elif is_recording:
-            payload["status"] = "recording"
-        elif is_live:
-            payload["status"] = "live"
-        elif is_live is False and is_recording is False:
-            payload["status"] = "offline"
+        elif not is_account_deleted:
+            if is_recording:
+                payload["status"] = "recording"
+            elif is_live:
+                payload["status"] = "live"
+            elif is_live is False and is_recording is False:
+                payload["status"] = "offline"
 
         headers = get_supabase_headers()
         url = f"{SUPABASE_URL}/rest/v1/tiktok_streamers?username=eq.{user}"

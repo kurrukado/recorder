@@ -225,6 +225,7 @@ def check_live_details(user: str, cookies: Optional[dict] = None, proxy: Optiona
         "preview_duration": None,
         "avatar_thumb": None,
         "nickname": None,
+        "is_account_deleted": False,
     }
     if not user:
         return details
@@ -266,6 +267,16 @@ def check_live_details(user: str, cookies: Optional[dict] = None, proxy: Optiona
                 if api_res.status_code == 200:
                     api_json = api_res.json()
                     if isinstance(api_json, dict):
+                        if (
+                            api_json.get("message") == "user_not_found"
+                            or api_json.get("statusCode") in (19881007, 10221)
+                            or (api_json.get("data") is None and api_json.get("message") == "user_not_found")
+                        ):
+                            details["is_account_deleted"] = True
+                            details["is_live"] = False
+                            details["room_id"] = None
+                            return details
+
                         data = api_json.get("data")
                         data = data if isinstance(data, dict) else {}
                         live_room = data.get("liveRoom")
@@ -314,6 +325,16 @@ def check_live_details(user: str, cookies: Optional[dict] = None, proxy: Optiona
                 if u_res.status == 200:
                     u_json = json.loads(u_res.read().decode("utf-8", errors="replace"))
                     if isinstance(u_json, dict):
+                        if (
+                            u_json.get("message") == "user_not_found"
+                            or u_json.get("statusCode") in (19881007, 10221)
+                            or (u_json.get("data") is None and u_json.get("message") == "user_not_found")
+                        ):
+                            details["is_account_deleted"] = True
+                            details["is_live"] = False
+                            details["room_id"] = None
+                            return details
+
                         data = u_json.get("data") or {}
                         live_room = data.get("liveRoom") or {}
                         user_data = data.get("user") or {}
@@ -356,10 +377,25 @@ def check_live_details(user: str, cookies: Optional[dict] = None, proxy: Optiona
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         }
         res = session.get(url, headers=headers, timeout=7)
+        if res.status_code == 404:
+            details["is_account_deleted"] = True
+            details["is_live"] = False
+            details["room_id"] = None
+            return details
         if res.status_code == 200:
             res_text = res.text
             # Guard: Giới hạn xử lý tối đa 4MB để tránh regex backtracking / phình RAM khi gặp response lỗi
             if len(res_text) <= 4 * 1024 * 1024:
+                if (
+                    '"statusCode":10221' in res_text
+                    or '"statusCode": 10221' in res_text
+                    or '"user_not_found"' in res_text
+                ):
+                    details["is_account_deleted"] = True
+                    details["is_live"] = False
+                    details["room_id"] = None
+                    return details
+
                 # 1. Phân tích thẻ SIGI_STATE
                 m = re.search(r'<script id="SIGI_STATE"[^>]*>(.*?)</script>', res_text, re.DOTALL)
                 if m:

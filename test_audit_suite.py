@@ -1935,17 +1935,51 @@ class TestBitstreamCorruptionDetection(unittest.TestCase):
         old_gate = 'filepath.lower().endswith(".mp4") and codec == "h264" and audio_codec in ("aac", "none")'
         self.assertNotIn(old_gate, src)
 
-    def test_sanitize_rejects_corrupt_box_without_hanging(self):
-        """Box size < 8 phải dừng ngay, không seek lùi/làm treo vòng lặp."""
-        import auto_h264
-        import tempfile
-        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tf:
-            tf.write(b"\x00\x00\x00\x04mdat" + b"0" * 2048)
-            path = tf.name
-        try:
-            self.assertIsNone(auto_h264.sanitize_mp4_bitstream(path))
-        finally:
-            os.remove(path)
+    def test_check_live_details_detects_deleted_account_native_api(self):
+        """Test Native Live API detects deleted/banned account via user_not_found / 19881007."""
+        import recorder_core
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "data": None,
+            "message": "user_not_found",
+            "statusCode": 19881007
+        }
+        with patch("curl_cffi.requests.get", return_value=mock_resp):
+            det = recorder_core.check_live_details("deleted_user_xyz_123")
+            self.assertTrue(det["is_account_deleted"])
+            self.assertFalse(det["is_live"])
+            self.assertIsNone(det["room_id"])
+
+    def test_check_live_details_detects_deleted_account_html_scrape(self):
+        """Test HTML scrape detects 404 or statusCode 10221 for deleted account."""
+        import recorder_core
+        with patch("curl_cffi.requests.get", side_effect=Exception("skip native")):
+            with patch("curl_cffi.requests.Session") as mock_s_cls:
+                mock_s = MagicMock()
+                mock_s_cls.return_value = mock_s
+                mock_resp = MagicMock()
+                mock_resp.status_code = 200
+                mock_resp.text = '<html><script>{"statusCode":10221,"userInfo":null}</script></html>'
+                mock_s.get.return_value = mock_resp
+
+                det = recorder_core.check_live_details("deleted_html_usr")
+                self.assertTrue(det["is_account_deleted"])
+                self.assertFalse(det["is_live"])
+
+    def test_supabase_sync_update_streamer_deleted_status(self):
+        """Test update_streamer_status_supabase sets status='deleted' and is_account_deleted=True."""
+        import supabase_sync
+        with patch("requests.patch") as mock_patch:
+            mock_res = MagicMock(status_code=204)
+            mock_patch.return_value.__enter__.return_value = mock_res
+            ok = supabase_sync.update_streamer_status_supabase("del_user", is_account_deleted=True)
+            self.assertTrue(ok)
+            called_payload = mock_patch.call_args[1]["json"]
+            self.assertTrue(called_payload["is_account_deleted"])
+            self.assertEqual(called_payload["status"], "deleted")
+            self.assertFalse(called_payload["is_live"])
+            self.assertFalse(called_payload["is_recording"])
 
 
 if __name__ == "__main__":

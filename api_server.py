@@ -244,6 +244,7 @@ def get_user_live_details_cached(user: str, force_refresh: bool = False) -> dict
         "is_preview": False,
         "avatar_thumb": None,
         "nickname": None,
+        "is_account_deleted": False,
         "timestamp": now
     }
     probe_ok = False
@@ -255,6 +256,7 @@ def get_user_live_details_cached(user: str, force_refresh: bool = False) -> dict
         details["is_preview"] = raw.get("is_preview", False)
         details["avatar_thumb"] = raw.get("avatar_thumb")
         details["nickname"] = raw.get("nickname")
+        details["is_account_deleted"] = bool(raw.get("is_account_deleted", False))
         probe_ok = True
     except Exception as probe_err:
         # Chỉ ghi cache khi probe THẬT SỰ trả lời được. Một lỗi mạng tạm thời
@@ -665,7 +667,15 @@ def get_users(check_live: bool = True, fresh: bool = False):
         if live_statuses:
             def _bg_sync_supa_live(live_map):
                 for usr, d_info in live_map.items():
-                    if d_info.get("is_live"):
+                    if d_info.get("is_account_deleted"):
+                        supabase_sync.update_streamer_status_supabase(
+                            usr,
+                            is_account_deleted=True,
+                            status="deleted",
+                            is_live=False,
+                            is_recording=False
+                        )
+                    elif d_info.get("is_live"):
                         supabase_sync.update_streamer_status_supabase(
                             usr,
                             is_live=True,
@@ -695,7 +705,12 @@ def get_users(check_live: bool = True, fresh: bool = False):
                     except Exception:
                         sd_live = False
 
-            if is_recording:
+            is_deleted = bool(det.get("is_account_deleted") or sd.get("is_account_deleted") or sd.get("status") == "deleted")
+            if is_deleted:
+                status_str = "deleted"
+                is_live = False
+                is_recording = False
+            elif is_recording:
                 status_str = "recording"
                 is_live = True
             elif det.get("is_live", False) or sd_live:
@@ -720,6 +735,7 @@ def get_users(check_live: bool = True, fresh: bool = False):
                 "room_id": room_id,
                 "is_recording": is_recording,
                 "status": status_str,
+                "is_account_deleted": is_deleted,
                 "is_sub_only": is_sub_only,
                 "is_preview": is_preview
             })
