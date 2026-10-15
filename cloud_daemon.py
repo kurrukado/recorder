@@ -396,7 +396,8 @@ def streamer_recording_worker(user, initial_room_id, auto_discover=True, stop_ev
                             duration=target_duration,
                             stop_event=stop_event,
                             auto_sync_gdrive=False,
-                            is_sub_only=is_sub_only
+                            is_sub_only=is_sub_only,
+                            allow_audio_only=False
                         )
                     except Exception as rec_err:
                         log(f"[!] [@{user}] Lỗi khi ghi hình đoạn mới (luồng #{cand_idx+1}): {rec_err}")
@@ -413,6 +414,26 @@ def streamer_recording_worker(user, initial_room_id, auto_discover=True, stop_ev
                                 pass
                             if len(stream_candidates) > cand_idx + 1:
                                 log(f"[⚠️] [@{user}] Luồng #{cand_idx+1} không đạt chuẩn ({v_reason}). Tự động fallback sang luồng dự phòng #{cand_idx+2}...")
+
+                # Trường hợp đặc biệt: Phòng Live thuần Âm thanh (Voice Live / Podcast không camera)
+                # Khi tất cả luồng video đều không bắt được, thử 1 lần cuối với allow_audio_only=True
+                if not is_valid and stream_candidates and (not stop_event or not stop_event.is_set()):
+                    try:
+                        log(f"[🎙️] [@{user}] Các luồng video không nhận được hình ảnh. Thử kiểm tra chế độ Live Âm thanh (Voice Live)...")
+                        rec_result = recorder_core.record_stream_ffmpeg(
+                            stream_candidates[0],
+                            output_filename=seg_name,
+                            target_user=user,
+                            duration=target_duration,
+                            stop_event=stop_event,
+                            auto_sync_gdrive=False,
+                            is_sub_only=is_sub_only,
+                            allow_audio_only=True
+                        )
+                        if rec_result and os.path.exists(rec_result):
+                            is_valid, v_reason, v_dur = validate_playable_video(rec_result, min_duration=5.0, min_size_bytes=250000)
+                    except Exception as vl_err:
+                        log(f"[!] [@{user}] Thử ghi chế độ Voice Live không thành công: {vl_err}")
 
                 if is_valid:
                     consecutive_failures = 0
@@ -912,19 +933,22 @@ def run_daemon(max_minutes=210, interval=25, auto_discover=True):
             active_set = set(ACTIVE_RECORDERS.keys())
             slots_available = MAX_CONCURRENT_RECORDERS - len(active_set)
 
-        # Tránh ghi đè trùng lặp với Render/local runner nếu đang có heartbeat tươi (< 180s) trên Drive
+        # Tránh ghi đè trùng lặp với Render/local runner nếu đang có heartbeat tươi trên Drive.
+        # Lưu ý: Trên GitHub Actions runner, concurrency lock đã ngăn chạy song song,
+        # nên không loại bỏ streamer để không bỏ lỡ 90s live đầu tiên khi luân chuyển runner.
         drive_busy_users = set()
-        try:
-            drive_details = gdrive_manager.load_active_recordings_from_drive(as_details=True) or []
-            now_ts = int(time.time())
-            for it in drive_details:
-                u_name = it.get("username") if isinstance(it, dict) else str(it)
-                up_at = it.get("updated_at", 0) if isinstance(it, dict) else 0
-                # ponytail: 90s covers 1+ heartbeat cycle (~75s), faster runner rotation after clean exit
-                if u_name and (now_ts - up_at < 90):
-                    drive_busy_users.add(u_name.strip().replace("@", "").lower())
-        except Exception:
-            pass
+        is_ci_runner = os.environ.get("GITHUB_ACTIONS") == "true"
+        if not is_ci_runner:
+            try:
+                drive_details = gdrive_manager.load_active_recordings_from_drive(as_details=True) or []
+                now_ts = int(time.time())
+                for it in drive_details:
+                    u_name = it.get("username") if isinstance(it, dict) else str(it)
+                    up_at = it.get("updated_at", 0) if isinstance(it, dict) else 0
+                    if u_name and (now_ts - up_at < 45):
+                        drive_busy_users.add(u_name.strip().replace("@", "").lower())
+            except Exception:
+                pass
 
         # Ưu tiên các streamer mới nhất (ở cuối danh sách) lên đầu hàng đợi kiểm tra
         users_to_check = [u for u in reversed(users) if u not in active_set and u not in drive_busy_users]
@@ -943,7 +967,8 @@ def run_daemon(max_minutes=210, interval=25, auto_discover=True):
                 except Exception:
                     return u, {"is_live": False, "room_id": None, "is_account_deleted": False}
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(users_to_check), 6)) as executor:
+            # Quét đa luồng thông minh (16 workers) giúp kiểm tra toàn bộ 70+ streamer trong < 10 giây
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(users_to_check), 16)) as executor:
                 check_results = list(executor.map(_check, users_to_check))
 
             for user, det in check_results:

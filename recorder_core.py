@@ -1044,7 +1044,7 @@ def _cleanup_global_procs():
 
 atexit.register(_cleanup_global_procs)
 
-def record_stream_ffmpeg(stream_url, output_filename=None, target_user="islizanx", duration=None, stop_event=None, auto_sync_gdrive=True, is_sub_only: bool = False):
+def record_stream_ffmpeg(stream_url, output_filename=None, target_user="islizanx", duration=None, stop_event=None, auto_sync_gdrive=True, is_sub_only: bool = False, allow_audio_only: bool = False):
     """
     Records a live stream URL to an MP4 file using ffmpeg without re-encoding,
     then automatically ensures it is in standard H.264 (AVC) format.
@@ -1095,17 +1095,18 @@ def record_stream_ffmpeg(stream_url, output_filename=None, target_user="islizanx
             "-reconnect_delay_max", "10",
         ])
 
+    video_map = "0:v:0?" if allow_audio_only else "0:v:0"
     cmd.extend([
         "-correct_ts_overflow", "1",
         "-fflags", "+genpts+discardcorrupt+nobuffer",
-        "-analyzeduration", "3000000",
-        "-probesize", "2000000",
+        "-analyzeduration", "8000000",
+        "-probesize", "8000000",
         "-headers", (
             "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36\r\n"
             "Referer: https://www.tiktok.com/\r\n"
         ),
         "-i", stream_url,
-        "-map", "0:v:0?",
+        "-map", video_map,
         "-map", "0:a:0?",
         "-c:v", "copy",
         "-c:a", "copy",
@@ -1165,6 +1166,13 @@ def record_stream_ffmpeg(stream_url, output_filename=None, target_user="islizanx
                 h_desc = f"{duration // 3600} tiếng" if duration >= 3600 else f"{duration}s"
                 print(f"\n\n[⏱️ Tối đa {h_desc}] [@{target_user}] Đã đạt thời lượng phân đoạn ({hours:02d}:{mins:02d}:{secs:02d}). Đang chốt file để tải lên Cloud...")
                 _safe_stop_ffmpeg(proc, timeout=8)
+                break
+
+            # Fast Failover: Nếu sau 8 giây đầu tiên mà file vẫn rỗng hoặc < 20KB (CDN timeout/treo luồng),
+            # dừng ngay để chuyển sang luồng dự phòng (fallback candidate) mà không để streamer bị lỡ nhịp.
+            if elapsed >= 8 and size_bytes < 20 * 1024:
+                print(f"\n\n[⚡ Fast-Failover] [@{target_user}] Không nhận được dữ liệu video sau {elapsed}s (CDN timeout/treo). Chuyển sang luồng dự phòng ngay...")
+                _safe_stop_ffmpeg(proc, timeout=3)
                 break
 
             # Quick Watchdog cho VIP Sub-Only: khi dung lượng không tăng trong >= 14 giây, lập tức chốt file preview nhanh chóng
