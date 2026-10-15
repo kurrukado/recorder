@@ -16,14 +16,13 @@ concurrency:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
-  DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK || 'https://discord.com/api/webhooks/1360302046116315246/_t_vP_iT1wPfsmyK3DLKafKAJKE3XDG2nH4DF_M6oVfYpf_3S0v8smVf1915_-ayILqx' }}
 
 permissions:
   contents: read
 
 jobs:
   test-and-verify:
-    name: Run Linter, 104 Tests & Discord Alert
+    name: Run Linter & 104 Tests
     runs-on: ubuntu-24.04
     timeout-minutes: 15
 
@@ -94,47 +93,3 @@ jobs:
           except Exception as e:
               print(f'[-] Render API health warning (có thể đang sleep): {e}')
           "
-
-      - name: 4. Gửi Báo Cáo Kết Quả về Discord
-        if: always()
-        run: |
-          python -c "
-          import os, json
-
-          linter_failed = os.environ.get('LINTER_FAILED') == 'true'
-          tests_failed = os.environ.get('TESTS_FAILED') == 'true'
-          job_status = 'failure' if (linter_failed or tests_failed) else 'success'
-
-          linter_info = '0 lỗi syntax, 0 biến chưa khai báo (Clean)'
-          if os.path.exists('linter_report.txt'):
-              with open('linter_report.txt', 'r', encoding='utf-8', errors='ignore') as f:
-                  ltxt = f.read().strip()
-                  if ltxt and ltxt != '0':
-                      linter_info = ltxt
-
-          test_info = '78/78 Tests PASSED (100% OK)'
-          error_extract = ''
-          if os.path.exists('test_report.txt'):
-              with open('test_report.txt', 'r', encoding='utf-8', errors='ignore') as f:
-                  ttxt = f.read()
-                  if 'FAILED' in ttxt:
-                      test_info = 'FAILED - Có bài test không vượt qua!'
-                      lines = ttxt.splitlines()
-                      error_extract = '\n'.join(lines[-25:])
-
-          report = {
-              'linter': linter_info[:500],
-              'tests': test_info,
-              'error_log': error_extract if job_status == 'failure' else ''
-          }
-
-          with open('ci_final_report.json', 'w', encoding='utf-8') as f:
-              json.dump(report, f, indent=2, ensure_ascii=False)
-          "
-
-          JOB_OUTCOME="${{ job.status }}"
-          if [ "$JOB_OUTCOME" != "success" ]; then
-            python ci_discord_notifier.py failure ci_final_report.json
-          else
-            python ci_discord_notifier.py success ci_final_report.json
-          fi
