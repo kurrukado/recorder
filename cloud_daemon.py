@@ -837,6 +837,7 @@ def run_daemon(max_minutes=210, interval=25, auto_discover=True):
         log(f"[!] Lỗi kiểm tra Google Drive: {e}")
 
     session_count = 0
+    _DELETED_IN_DB_SET = set()
 
     while True:
         elapsed = time.time() - start_time
@@ -920,6 +921,16 @@ def run_daemon(max_minutes=210, interval=25, auto_discover=True):
                 if now_ts_cd - _USER_START_COOLDOWN[u_cd] > USER_START_COOLDOWN_SECONDS * 2:
                     _USER_START_COOLDOWN.pop(u_cd, None)
 
+            # Lấy danh sách streamer bị đánh dấu deleted từ Supabase để tự động gỡ nếu tài khoản còn sống
+            try:
+                all_sd = supabase_sync.fetch_streamers_details_from_supabase()
+                _DELETED_IN_DB_SET = {
+                    d["username"] for d in all_sd
+                    if d.get("is_account_deleted") or d.get("status") == "deleted"
+                }
+            except Exception:
+                pass
+
             # Định kỳ kiểm tra và tự động xả các video trong Staging Queue đã quá 24h không live mới
             try:
                 import staging_queue
@@ -974,6 +985,40 @@ def run_daemon(max_minutes=210, interval=25, auto_discover=True):
             for user, det in check_results:
                 if not isinstance(det, dict):
                     continue
+
+                # 1. Tự động cập nhật khi streamer đổi username (@)
+                new_username = det.get("new_username")
+                if new_username and new_username != user:
+                    log(f"🔄 [@{user}] Phát hiện đổi username thành @{new_username}. Đang tự động cập nhật hệ thống...")
+                    try:
+                        supabase_sync.rename_streamer_supabase(user, new_username)
+                        cfg = load_config()
+                        if "monitored_users" in cfg and isinstance(cfg["monitored_users"], list):
+                            cfg["monitored_users"] = [
+                                new_username if str(x).strip().replace("@", "").lower() == user else x
+                                for x in cfg["monitored_users"]
+                            ]
+                            save_config(cfg)
+                        with DRIVE_USERS_LOCK:
+                            if _CACHED_DRIVE_USERS:
+                                _CACHED_DRIVE_USERS = [
+                                    new_username if x == user else x
+                                    for x in _CACHED_DRIVE_USERS
+                                ]
+                                try:
+                                    gdrive_manager.save_streamers_to_drive(_CACHED_DRIVE_USERS)
+                                except Exception:
+                                    pass
+                        notifier.send_telegram(
+                            f"🔄 <b>ĐỔI USERNAME TIKTOK:</b>\n"
+                            f"Streamer <code>@{user}</code> đã đổi tên thành <code>@{new_username}</code>.\n"
+                            f"Hệ thống đã tự động cập nhật cơ sở dữ liệu và tiếp tục theo dõi 24/7!"
+                        )
+                        user = new_username
+                    except Exception as ren_err:
+                        log(f"[!] Lỗi khi tự động đổi tên @{user} -> @{new_username}: {ren_err}")
+
+                # 2. Xử lý tài khoản bị xóa thật
                 if det.get("is_account_deleted"):
                     log(f"⚠️ [@{user}] Phát hiện tài khoản TikTok đã bị xóa / không tồn tại. Đánh dấu 'deleted' trên Supabase...")
                     try:
@@ -987,6 +1032,19 @@ def run_daemon(max_minutes=210, interval=25, auto_discover=True):
                     except Exception:
                         pass
                     continue
+                else:
+                    # 3. Tự động phục hồi tài khoản bị đánh dấu 'deleted' nhầm
+                    if user in _DELETED_IN_DB_SET:
+                        log(f"✅ [@{user}] Tài khoản TikTok hoạt động bình thường! Tự động khôi phục từ 'deleted' về 'offline' trên Supabase...")
+                        try:
+                            supabase_sync.update_streamer_status_supabase(
+                                user,
+                                is_account_deleted=False,
+                                status="offline"
+                            )
+                            _DELETED_IN_DB_SET.discard(user)
+                        except Exception:
+                            pass
 
                 is_live = det.get("is_live", False)
                 room_id = det.get("room_id")

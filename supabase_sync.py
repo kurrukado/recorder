@@ -91,6 +91,38 @@ def fetch_streamers_details_from_supabase() -> list:
         print(f"[SUPABASE-SYNC] [!] Lỗi nạp streamers chi tiết từ Supabase: {e}")
     return []
 
+def rename_streamer_supabase(old_user: str, new_user: str) -> bool:
+    """
+    Khi streamer đổi @ (username) trên TikTok:
+    Tự động cập nhật username mới trong bảng tiktok_streamers và tiktok_recordings trên Supabase.
+    """
+    old_user = old_user.strip().replace("@", "").lower()
+    new_user = new_user.strip().replace("@", "").lower()
+    if not old_user or not new_user or old_user == new_user:
+        return False
+    try:
+        headers = get_supabase_headers()
+        now_iso = datetime.now(timezone.utc).isoformat()
+        # 1. Cập nhật bảng tiktok_streamers (thay username cũ bằng username mới)
+        url_st = f"{SUPABASE_URL}/rest/v1/tiktok_streamers?username=eq.{old_user}"
+        payload_st = {
+            "username": new_user,
+            "is_account_deleted": False,
+            "updated_at": now_iso
+        }
+        res_st = requests.patch(url_st, headers=headers, json=payload_st, timeout=10)
+
+        # 2. Cập nhật bảng tiktok_recordings (đổi username cũ sang mới để web xem video cũ không bị mất)
+        url_rec = f"{SUPABASE_URL}/rest/v1/tiktok_recordings?username=eq.{old_user}"
+        payload_rec = {"username": new_user}
+        requests.patch(url_rec, headers=headers, json=payload_rec, timeout=10)
+
+        print(f"[SUPABASE-SYNC] [✓] Đã tự động cập nhật username từ @{old_user} sang @{new_user} trên Supabase!")
+        return res_st.status_code in (200, 204)
+    except Exception as e:
+        print(f"[SUPABASE-SYNC] [!] Lỗi đổi tên streamer từ @{old_user} sang @{new_user}: {e}")
+        return False
+
 def update_streamer_status_supabase(user: str, is_live: Optional[bool] = None, is_recording: Optional[bool] = None,
                                    room_id: Optional[str] = None, nickname: Optional[str] = None,
                                    avatar_thumb: Optional[str] = None, status: Optional[str] = None,
@@ -101,6 +133,11 @@ def update_streamer_status_supabase(user: str, is_live: Optional[bool] = None, i
         if not user:
             return False
         payload = {"updated_at": datetime.now(timezone.utc).isoformat()}
+
+        # Nếu streamer đang live hoặc đang quay, 100% tài khoản đó KHÔNG THỂ bị xóa
+        if is_live or is_recording:
+            payload["is_account_deleted"] = False
+
         if is_account_deleted is not None:
             payload["is_account_deleted"] = bool(is_account_deleted)
             if is_account_deleted:
@@ -108,22 +145,25 @@ def update_streamer_status_supabase(user: str, is_live: Optional[bool] = None, i
                 payload["is_live"] = False
                 payload["is_recording"] = False
                 payload["room_id"] = None
+            else:
+                if status == "deleted":
+                    payload["status"] = "offline"
 
-        if is_live is not None and not is_account_deleted:
+        if is_live is not None and not payload.get("is_account_deleted"):
             payload["is_live"] = is_live
             if is_live:
                 payload["last_live_at"] = payload["updated_at"]
-        if is_recording is not None and not is_account_deleted:
+        if is_recording is not None and not payload.get("is_account_deleted"):
             payload["is_recording"] = is_recording
-        if room_id is not None and not is_account_deleted:
+        if room_id is not None and not payload.get("is_account_deleted"):
             payload["room_id"] = str(room_id) if room_id else None
         if nickname is not None:
             payload["nickname"] = nickname
         if avatar_thumb is not None:
             payload["avatar_thumb"] = avatar_thumb
-        if status is not None:
+        if status is not None and not (payload.get("is_account_deleted") and status != "deleted"):
             payload["status"] = status
-        elif not is_account_deleted:
+        elif not payload.get("is_account_deleted"):
             if is_recording:
                 payload["status"] = "recording"
             elif is_live:

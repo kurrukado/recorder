@@ -1981,8 +1981,63 @@ class TestBitstreamCorruptionDetection(unittest.TestCase):
             self.assertFalse(called_payload["is_live"])
             self.assertFalse(called_payload["is_recording"])
 
+    def test_rename_streamer_supabase(self):
+        """Test rename_streamer_supabase patches both tiktok_streamers and tiktok_recordings."""
+        import supabase_sync
+        with patch("requests.patch") as mock_patch:
+            mock_res = MagicMock(status_code=204)
+            mock_patch.return_value = mock_res
+            ok = supabase_sync.rename_streamer_supabase("old_handle", "new_handle")
+            self.assertTrue(ok)
+            self.assertEqual(mock_patch.call_count, 2)
+            # 1st call: tiktok_streamers
+            url1 = mock_patch.call_args_list[0][0][0]
+            json1 = mock_patch.call_args_list[0][1]["json"]
+            self.assertIn("tiktok_streamers?username=eq.old_handle", url1)
+            self.assertEqual(json1["username"], "new_handle")
+            self.assertFalse(json1["is_account_deleted"])
+
+            # 2nd call: tiktok_recordings
+            url2 = mock_patch.call_args_list[1][0][0]
+            json2 = mock_patch.call_args_list[1][1]["json"]
+            self.assertIn("tiktok_recordings?username=eq.old_handle", url2)
+            self.assertEqual(json2["username"], "new_handle")
+
+    def test_check_live_details_detects_username_change(self):
+        """Test check_live_details detects new username from Native API uniqueId and redirect URL."""
+        import recorder_core
+        # 1. Native API returns fresh uniqueId different from old handle
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "data": {
+                "user": {"uniqueId": "renamed_brand_new_handle", "nickname": "Brand New"},
+                "liveRoom": {"status": 2, "roomId": "999888777"}
+            },
+            "statusCode": 0
+        }
+        with patch("curl_cffi.requests.get", return_value=mock_resp):
+            det = recorder_core.check_live_details("old_handle_xyz")
+            self.assertEqual(det.get("new_username"), "renamed_brand_new_handle")
+            self.assertTrue(det["is_live"])
+
+        # 2. Redirect URL detects renamed handle
+        with patch("curl_cffi.requests.get", side_effect=Exception("skip native")):
+            with patch("curl_cffi.requests.Session") as mock_s_cls:
+                mock_s = MagicMock()
+                mock_s_cls.return_value = mock_s
+                mock_resp2 = MagicMock()
+                mock_resp2.status_code = 200
+                mock_resp2.url = "https://www.tiktok.com/@redirected_handle_new/live"
+                mock_resp2.text = "<html></html>"
+                mock_s.get.return_value = mock_resp2
+
+                det2 = recorder_core.check_live_details("initial_handle")
+                self.assertEqual(det2.get("new_username"), "redirected_handle_new")
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 

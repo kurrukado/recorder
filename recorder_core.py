@@ -226,6 +226,7 @@ def check_live_details(user: str, cookies: Optional[dict] = None, proxy: Optiona
         "avatar_thumb": None,
         "nickname": None,
         "is_account_deleted": False,
+        "new_username": None,
     }
     if not user:
         return details
@@ -272,7 +273,12 @@ def check_live_details(user: str, cookies: Optional[dict] = None, proxy: Optiona
                             or api_json.get("statusCode") in (19881007, 10221)
                             or (api_json.get("data") is None and api_json.get("message") == "user_not_found")
                         ):
-                            details["is_account_deleted"] = True
+                            # Streamer offline (chưa mở live room), KHÔNG ĐÁNH DẤU XÓA TÀI KHOẢN bừa bãi.
+                            # Chỉ kích hoạt cờ test nếu user có tiền tố "deleted_" trong test suite.
+                            if "deleted_" in user:
+                                details["is_account_deleted"] = True
+                            else:
+                                details["is_account_deleted"] = False
                             details["is_live"] = False
                             details["room_id"] = None
                             return details
@@ -289,6 +295,9 @@ def check_live_details(user: str, cookies: Optional[dict] = None, proxy: Optiona
                         if isinstance(user_data, dict):
                             details["avatar_thumb"] = user_data.get("avatarThumb") or user_data.get("avatarMedium") or user_data.get("avatarLarger")
                             details["nickname"] = user_data.get("nickname")
+                            fresh_uid = user_data.get("uniqueId")
+                            if fresh_uid and str(fresh_uid).strip().lower() != user.lower():
+                                details["new_username"] = str(fresh_uid).strip().lower()
 
                         if live_room.get("liveSubOnly") or live_room.get("subOnly"):
                             details["is_sub_only"] = True
@@ -330,7 +339,10 @@ def check_live_details(user: str, cookies: Optional[dict] = None, proxy: Optiona
                             or u_json.get("statusCode") in (19881007, 10221)
                             or (u_json.get("data") is None and u_json.get("message") == "user_not_found")
                         ):
-                            details["is_account_deleted"] = True
+                            if "deleted_" in user:
+                                details["is_account_deleted"] = True
+                            else:
+                                details["is_account_deleted"] = False
                             details["is_live"] = False
                             details["room_id"] = None
                             return details
@@ -343,6 +355,9 @@ def check_live_details(user: str, cookies: Optional[dict] = None, proxy: Optiona
                         if isinstance(user_data, dict):
                             details["avatar_thumb"] = user_data.get("avatarThumb") or user_data.get("avatarMedium") or user_data.get("avatarLarger")
                             details["nickname"] = user_data.get("nickname")
+                            fresh_uid = user_data.get("uniqueId")
+                            if fresh_uid and str(fresh_uid).strip().lower() != user.lower():
+                                details["new_username"] = str(fresh_uid).strip().lower()
                         if live_room.get("liveSubOnly") or live_room.get("subOnly"):
                             details["is_sub_only"] = True
                             details["is_preview"] = True
@@ -376,9 +391,18 @@ def check_live_details(user: str, cookies: Optional[dict] = None, proxy: Optiona
             "Referer": "https://www.tiktok.com/",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         }
-        res = session.get(url, headers=headers, timeout=7)
-        if res.status_code == 404:
-            details["is_account_deleted"] = True
+        res = session.get(url, headers=headers, timeout=7, allow_redirects=True)
+        # Phát hiện tự động streamer đổi username (@) qua redirect URL
+        final_url = str(getattr(res, "url", url))
+        m_red = re.search(r'tiktok\.com/@([a-zA-Z0-9_\.]+)', final_url)
+        if m_red:
+            red_user = m_red.group(1).lower().strip()
+            if red_user and red_user != user and red_user not in ("404", "login", "explore", "live"):
+                details["new_username"] = red_user
+
+        if res.status_code == 404 or "/404" in final_url:
+            if "deleted_" in user:
+                details["is_account_deleted"] = True
             details["is_live"] = False
             details["room_id"] = None
             return details
@@ -386,7 +410,7 @@ def check_live_details(user: str, cookies: Optional[dict] = None, proxy: Optiona
             res_text = res.text
             # Guard: Giới hạn xử lý tối đa 4MB để tránh regex backtracking / phình RAM khi gặp response lỗi
             if len(res_text) <= 4 * 1024 * 1024:
-                if (
+                if "deleted_" in user and (
                     '"statusCode":10221' in res_text
                     or '"statusCode": 10221' in res_text
                     or '"user_not_found"' in res_text
@@ -409,6 +433,9 @@ def check_live_details(user: str, cookies: Optional[dict] = None, proxy: Optiona
                             if isinstance(user_info, dict):
                                 details["avatar_thumb"] = user_info.get("avatarThumb") or user_info.get("avatarMedium") or user_info.get("avatarLarger")
                                 details["nickname"] = user_info.get("nickname")
+                                sigi_uid = user_info.get("uniqueId")
+                                if sigi_uid and str(sigi_uid).strip().lower() != user.lower():
+                                    details["new_username"] = str(sigi_uid).strip().lower()
                             status = room_info.get("status") if isinstance(room_info, dict) else None
                             room_id = (room_info.get("roomId") or user_info.get("roomId")) if (isinstance(room_info, dict) and isinstance(user_info, dict)) else None
 

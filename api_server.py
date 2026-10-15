@@ -667,6 +667,14 @@ def get_users(check_live: bool = True, fresh: bool = False):
         if live_statuses:
             def _bg_sync_supa_live(live_map):
                 for usr, d_info in live_map.items():
+                    # 1. Tự động đổi tên nếu streamer đổi handle (@)
+                    new_u = d_info.get("new_username")
+                    if new_u and new_u != usr:
+                        try:
+                            supabase_sync.rename_streamer_supabase(usr, new_u)
+                        except Exception:
+                            pass
+                    # 2. Xử lý tài khoản bị xóa thật
                     if d_info.get("is_account_deleted"):
                         supabase_sync.update_streamer_status_supabase(
                             usr,
