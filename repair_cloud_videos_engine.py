@@ -15,21 +15,146 @@ import auto_h264
 PROGRESS_FILE = os.path.join(BASE_DIR, "cloud_repair_progress.json")
 SCAN_REPORT_PATH = os.path.join(BASE_DIR, "scan_report.json")
 
+# Tiến trình sửa chữa còn được lưu bền vững trên Google Drive (thư mục tiktok-record).
+# Runner GitHub Actions là ephemeral: file cục bộ KHÔNG tồn tại giữa các lần chạy, nên nếu
+# chỉ dựa vào file cục bộ thì mỗi lần watchdog thức dậy lại tải lại toàn bộ video trong 28h
+# (thực tế log run #63: 41 video / ~20GB tải về nhưng 0 file cần sửa). Lưu trên Drive để
+# các lần chạy sau bỏ qua video đã kiểm tra khỏe mạnh.
+PROGRESS_DRIVE_NAME = "cloud_repair_progress.json"
+MAX_REPAIRED_HISTORY = 5000     # Giới hạn lịch sử để file không phình vô hạn
+DEFAULT_MAX_VIDEOS = 40         # Trần số video xử lý mỗi lần chạy (bảo toàn phút GitHub Actions)
+_PROGRESS_FILE_ID = None        # Cache id file tiến trình trên Drive trong 1 lần chạy
+
+
+def _find_progress_file_id(access_token, root_id):
+    global _PROGRESS_FILE_ID
+    if _PROGRESS_FILE_ID:
+        return _PROGRESS_FILE_ID
+    q = f"name = '{PROGRESS_DRIVE_NAME}' and '{root_id}' in parents and trashed = false"
+    url = f"https://www.googleapis.com/drive/v3/files?q={requests.utils.quote(q)}&fields=files(id,name)"
+    try:
+        with requests.get(url, headers={"Authorization": f"Bearer {access_token}"}, timeout=12) as res:
+            if res.status_code == 200:
+                files = res.json().get("files", [])
+                if files:
+                    _PROGRESS_FILE_ID = files[0]["id"]
+                    return _PROGRESS_FILE_ID
+    except Exception as e:
+        print(f"[!] Không tra được file tiến trình trên Drive: {e}")
+    return None
+
+
+def _download_progress_from_drive():
+    try:
+        token = gdrive_manager.get_access_token()
+        if not token:
+            return None
+        root_id = gdrive_manager.find_or_create_folder("tiktok-record", access_token=token)
+        fid = _find_progress_file_id(token, root_id)
+        if not fid:
+            return None
+        url = f"https://www.googleapis.com/drive/v3/files/{fid}?alt=media"
+        with requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=15) as r:
+            if r.status_code == 200:
+                data = r.json()
+                if isinstance(data, dict):
+                    return data
+    except Exception as e:
+        print(f"[!] Không đọc được tiến trình repair từ Drive ({e}); dùng tiến trình cục bộ.")
+    return None
+
+
+def _upload_progress_to_drive(progress):
+    global _PROGRESS_FILE_ID
+    try:
+        token = gdrive_manager.get_access_token()
+        if not token:
+            return
+        root_id = gdrive_manager.find_or_create_folder("tiktok-record", access_token=token)
+        fid = _find_progress_file_id(token, root_id)
+        content = json.dumps(progress, ensure_ascii=False).encode("utf-8")
+        if fid:
+            url = f"https://www.googleapis.com/upload/drive/v3/files/{fid}?uploadType=media"
+            requests.patch(
+                url,
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                data=content,
+                timeout=20,
+            )
+        else:
+            meta = {"name": PROGRESS_DRIVE_NAME, "parents": [root_id]}
+            files_data = {
+                "data": ("metadata", json.dumps(meta), "application/json; charset=UTF-8"),
+                "file": (PROGRESS_DRIVE_NAME, content, "application/json"),
+            }
+            with requests.post(
+                "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id",
+                headers={"Authorization": f"Bearer {token}"},
+                files=files_data,
+                timeout=20,
+            ) as created:
+                if created.status_code in (200, 201):
+                    try:
+                        _PROGRESS_FILE_ID = created.json().get("id") or _PROGRESS_FILE_ID
+                    except Exception:
+                        pass
+    except Exception as e:
+        print(f"[!] Không lưu được tiến trình repair lên Drive ({e}).")
+
+
+def _merge_progress(local, remote):
+    """Hợp nhất tiến trình cục bộ với tiến trình trên Drive (không mất dữ liệu)."""
+    merged_repaired = list(dict.fromkeys(
+        [str(x) for x in (remote.get("repaired_ids") or [])] +
+        [str(x) for x in (local.get("repaired_ids") or [])]
+    ))
+    merged_failed = {}
+    for src in (remote.get("failed_ids") or {}, local.get("failed_ids") or {}):
+        if not isinstance(src, dict):
+            continue
+        for k, v in src.items():
+            k = str(k)
+            if isinstance(v, dict):
+                attempts = int(v.get("attempts", 0) or 0)
+                last = int(v.get("last_attempt", 0) or 0)
+                reason = v.get("reason") or "Failed during repair"
+            else:
+                attempts, last, reason = (1 if v else 0), 0, "Failed during repair"
+            prev = merged_failed.get(k)
+            if prev is None or attempts > prev["attempts"] or (attempts == prev["attempts"] and last > prev["last_attempt"]):
+                merged_failed[k] = {"reason": reason, "attempts": attempts, "last_attempt": last}
+    return {"repaired_ids": merged_repaired, "failed_ids": merged_failed}
+
+
 def load_progress():
+    local = {"repaired_ids": [], "failed_ids": {}}
     if os.path.exists(PROGRESS_FILE):
         try:
             with open(PROGRESS_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                local = loaded
         except Exception:
             pass
-    return {"repaired_ids": [], "failed_ids": {}}
+    remote = _download_progress_from_drive()
+    if isinstance(remote, dict):
+        return _merge_progress(local, remote)
+    local.setdefault("repaired_ids", [])
+    local.setdefault("failed_ids", {})
+    return local
+
 
 def save_progress(progress):
+    repaired = progress.get("repaired_ids", [])
+    if isinstance(repaired, list) and len(repaired) > MAX_REPAIRED_HISTORY:
+        # Giữ các id mới nhất; id cũ (>28h) không còn nằm trong cửa sổ --today nữa.
+        progress["repaired_ids"] = repaired[-MAX_REPAIRED_HISTORY:]
     try:
         with open(PROGRESS_FILE, "w", encoding="utf-8") as f:
             json.dump(progress, f, indent=2, ensure_ascii=False)
     except Exception:
         pass
+    _upload_progress_to_drive(progress)
 
 def download_file_from_drive(file_id, dest_path, access_token=None):
     if not access_token:
@@ -273,13 +398,16 @@ def process_single_repair(rec, access_token=None):
     print(f"✨ HOÀN TẤT XỬ LÝ ID {rec_id} TRONG {total_time:.1f} GIÂY!\n")
     return True
 
-def run_repair_engine(priority_only=False, today_only=False):
+def run_repair_engine(priority_only=False, today_only=False, max_videos=None):
     print("=" * 65)
     print("      KURU RECORD CLOUD VIDEO AUTO-REPAIR ENGINE (v61)")
     print("=" * 65)
 
+    if max_videos is None:
+        max_videos = DEFAULT_MAX_VIDEOS
+
     progress = load_progress()
-    repaired_set = set(progress.get("repaired_ids", []))
+    repaired_set = set(str(x) for x in progress.get("repaired_ids", []))
     failed_map = progress.get("failed_ids", {}) or {}
     MAX_RETRY_ATTEMPTS = 3
 
@@ -293,7 +421,7 @@ def run_repair_engine(priority_only=False, today_only=False):
     if today_only:
         headers = supabase_sync.get_supabase_headers()
         since_time = (datetime.now(timezone.utc) - timedelta(hours=28)).strftime("%Y-%m-%dT%H:%M:%S")
-        url = f"{supabase_sync.SUPABASE_URL}/rest/v1/tiktok_recordings?select=id,username,filename,drive_file_id,size_mb&created_at=gte.{since_time}&order=id.asc"
+        url = f"{supabase_sync.SUPABASE_URL}/rest/v1/tiktok_recordings?select=id,username,filename,drive_file_id,size_mb&created_at=gte.{since_time}&order=id.desc"
         try:
             r = requests.get(url, headers=headers, timeout=30)
             data = r.json() if r.status_code == 200 else []
@@ -329,9 +457,13 @@ def run_repair_engine(priority_only=False, today_only=False):
     # Filter out already repaired / đã lỗi quá nhiều lần
     queue = []
     skipped_permanent = 0
+    skipped_done = 0
     for t in targets:
         rec_id = t["id"]
-        if rec_id in repaired_set:
+        if str(rec_id) in repaired_set:
+            # Video đã được kiểm tra/ sửa trong các lần chạy trước (tiến trình lưu bền vững
+            # trên Drive) -> bỏ qua để KHÔNG tải lại hàng trăm MB vô ích.
+            skipped_done += 1
             continue
         attempts = _attempts_of(rec_id)
         if attempts >= MAX_RETRY_ATTEMPTS:
@@ -348,8 +480,16 @@ def run_repair_engine(priority_only=False, today_only=False):
             "_attempts": attempts
         })
 
+    if skipped_done:
+        print(f"[*] Bỏ qua {skipped_done} video đã kiểm tra khỏe mạnh ở lần chạy trước (tiết kiệm tải Drive).")
     if skipped_permanent:
         print(f"[*] Bỏ qua {skipped_permanent} video đã thất bại >= {MAX_RETRY_ATTEMPTS} lần (không thử lại vô hạn).")
+
+    # Giới hạn số video xử lý mỗi lần chạy để không vượt timeout-minutes của watchdog.
+    if len(queue) > max_videos:
+        print(f"[*] Danh sách có {len(queue)} video > trần {max_videos}/lần chạy. "
+              f"Chỉ xử lý {max_videos} video mới nhất trước (số còn lại để lần chạy sau).")
+        queue = queue[:max_videos]
 
     print(f"[*] Tìm thấy {len(queue)} video cần xử lý sửa đổi trên Drive.")
     if not queue:
@@ -391,4 +531,11 @@ def run_repair_engine(priority_only=False, today_only=False):
 if __name__ == "__main__":
     priority = "--priority" in sys.argv
     today = "--today" in sys.argv or "--morning" in sys.argv
-    run_repair_engine(priority_only=priority, today_only=today)
+    max_videos = DEFAULT_MAX_VIDEOS
+    for arg in sys.argv:
+        if arg.startswith("--max-videos="):
+            try:
+                max_videos = int(arg.split("=", 1)[1])
+            except ValueError:
+                pass
+    run_repair_engine(priority_only=priority, today_only=today, max_videos=max_videos)

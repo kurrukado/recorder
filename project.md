@@ -392,8 +392,11 @@ Sau khi xả hết hàng đợi cũ, xoá khối này thì `staging_queue.py` m�
 ### 5.8 `repair_cloud_videos_engine.py` (394 dòng) — tự lành
 `process_single_repair():182` (tải → sửa bitstream → `patch_file_to_drive():59` →
 cập nhật Supabase `update_supabase_metadata():158`), `run_repair_engine():276`
-(cờ `--today` = cửa sổ 28h, `--priority-only` = lỗi `NAL_UNIT_SIZE_ERROR`),
-lưu tiến độ `cloud_repair_progress.json` (`repaired_ids` / `failed_ids`), retry ≤3.
+(cờ `--today` = cửa sổ 28h, `--priority-only` = lỗi `NAL_UNIT_SIZE_ERROR`,
+`--max-videos=N` = trần số video/lần chạy, mặc định 40), lưu tiến độ
+`cloud_repair_progress.json` (`repaired_ids` / `failed_ids`) **cả cục bộ lẫn trên Google Drive**
+(`tiktok-record/cloud_repair_progress.json`) để runner ephemeral không tải lại video đã kiểm tra
+khỏe mạnh, retry ≤3 (xem mục 13).
 
 ### 5.9 Tiện ích khác
 * `notifier.py:25 send_telegram()` (cần `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`),
@@ -984,6 +987,59 @@ Còn lại / cần quyết định:
        - `https://kurumieverything.io.vn/api/record/users` -> `is_live: true, is_recording: true, status: recording`.
      - Chạy `npm run build` trên `web-truyen`: Thành công hoàn hảo 37/37 routes.
      - Chạy toàn bộ **104/104 tests**: **100% PASSED**.
+
+---
+
+## 13. ĐỐI CHIẾU LOG THỰC TẾ & TỐI ƯU TIÊU HAO TÀI NGUYÊN (Render Free / Drive 5TB / Vercel Free)
+
+> Nguồn đối chiếu: log 2 workflow mới nhất — `recorder.yml` run **#548** (success, ~177 phút) và
+> `repair-watchdog.yml` run **#63** (success, ~10 phút), cùng bộ test lõi.
+
+### 13.1 Phát hiện từ log (root-cause)
+
+1. **`recorder.yml` (#548) — "quay số" streamer 0 giây suốt 170 phút**
+   * Bằng chứng log: **229** lần `⚡ Fast-Failover ... sau 8s`, **155** lần `Stream ngắt hoặc không
+     nhận được dữ liệu hợp lệ`, **150** file bị loại `(<250KB)`, **75** lần `Phân đoạn 1 không đạt
+     chuẩn`. Chỉ **~5** lần upload thành công.
+   * Cơ chế gây lãng phí: khi `check_live_details()` trả `is_live=False` lúc *chưa thu được giây
+     nào* (`accumulated_seconds = 0.0`), bot vẫn vào **chờ xác nhận offline 300s** và gọi
+     `set_user_recording_status_drive()` **mỗi 15s ⇒ ~20 lần heartbeat/streamer/lần chờ** (mỗi lần
+     2-3 request Drive). Log điển hình: `@innne03 Tín hiệu live tạm ngắt sau 0.0s`.
+   * `@innne03` bị khởi động lại **7 lần**, `@jiyu111110` **3 lần** trong 1 phiên 170 phút mà không
+     thu được gì → chiếm slot ghi, đốt CPU FFmpeg, network và Drive API quota.
+
+2. **`repair-watchdog.yml` (#63) — tải ~20 GB mỗi lần để… không sửa gì**
+   * Bằng chứng log: `Tìm thấy 41 video`, **41/41** đều `[3/4] ... Bỏ qua upload Drive` (đã khỏe),
+     `Thành công: 41 | Thất bại: 0`. Tổng dung lượng tải ≈ **~20.4 GB/run**.
+   * Nguyên nhân: tiến trình `cloud_repair_progress.json` **chỉ lưu cục bộ** — runner GitHub Actions
+     là ephemeral nên file **không tồn tại giữa các lần chạy**; workflow cũng không commit ngược lại.
+     ⇒ 6 lần/ngày × ~20 GB ≈ **~120 GB/ngày** tải Drive vô ích.
+
+3. **`render.yaml` — Cron `tiktok-monitor` xung đột**
+   * Cron chạy `python cloud_daemon.py` (mặc định 210 phút) **mỗi 5 phút** ⇒ nếu kích hoạt sẽ tạo
+     hàng chục daemon ghi hình chồng nhau. Render Free không có Cron Jobs (tính năng trả phí) ⇒
+     cấu hình chết nhưng là mối nguy khi nâng gói.
+   * **Vercel Free**: giữ nguyên nguyên tắc 0-byte proxy (`video/*` luôn redirect tới Drive/Supabase,
+     không kéo qua Vercel) — API `/api/recordings` đã cache 60s nên cron `auto-sync-recordings.mjs`
+     không tạo bão request.
+
+### 13.2 Bản vá đã áp dụng
+
+| # | File | Thay đổi | Lợi ích |
+| :- | :--- | :--- | :--- |
+| 1 | `cloud_daemon.py` | Bỏ chờ xác nhận offline 300s khi `part_segments` rỗng (`accumulated_seconds < 15`) | Giảm mạnh heartbeat Drive + thời gian chết/streamer "độc" (≈5× nhanh hơn) |
+| 2 | `cloud_daemon.py` | Backoff lũy tiến `30s→60s→120s→240s→480s` (`MAX_START_COOLDOWN_SECONDS`) + theo dõi `_USER_FAILURE_STREAK` | Không "quay số" 1 streamer mỗi 30s suốt phiên |
+| 3 | `cloud_daemon.py` | `_SESSION_SKIP_USERS`: sau `MAX_USER_SESSION_FAILURES=3` phiên liên tiếp 0 giây → tạm bỏ qua tới hết phiên (tự reset ở runner mới) | Giải phóng slot ghi & CPU cho streamer thật |
+| 4 | `gdrive_manager.py` | Throttle heartbeat `is_recording=True` trùng lặp trong `_HEARTBEAT_MIN_INTERVAL=30s` (vẫn tươi so với TTL dedup 45s) | Giảm ~2-3× request ghi `active_recordings.json` |
+| 5 | `repair_cloud_videos_engine.py` | Lưu/đọc tiến trình **bền vững trên Google Drive** (`tiktok-record/cloud_repair_progress.json`) + hợp nhất local/Drive + trần `--max-videos=40` + `order=id.desc` | Chấm dứt ~20 GB tải lại/lần chạy; mỗi run chỉ tải video MỚI/chưa kiểm tra |
+| 6 | `api_server.py` | Áp dụng cùng guard `MIN_OFFLINE_CONFIRM_SECONDS` trong `bg_record_worker` | Giảm RAM/CPU & heartbeat spam trên Render Free 512MB |
+| 7 | `render.yaml` | Vô hiệu hóa cron `tiktok-monitor` (kèm chú thích cách bật lại đúng) | Tránh daemon chồng nhau / đốt tài nguyên Render |
+
+### 13.3 Kiểm thử
+* `flake8 . --select=E9,F63,F7,F82` ⇒ **0 lỗi**.
+* `python -m unittest test_audit_suite.py` ⇒ **82/82 PASSED** (exit code 0).
+* Hàm mới `_merge_progress()` được kiểm tra thủ công: gộp đúng `repaired_ids`/`failed_ids`,
+  giữ `attempts` lớn nhất và cắt lịch sử về `MAX_REPAIRED_HISTORY=5000`.
 
 ---
 

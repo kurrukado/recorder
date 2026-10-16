@@ -16,12 +16,21 @@ services:
       mountPath: /opt/render/project/src/recordings
       sizeGB: 10
 
-  - type: cron
-    name: tiktok-monitor
-    env: python
-    schedule: "*/5 * * * *"  # Every 5 minutes
-    buildCommand: pip install -r requirements.txt
-    startCommand: python cloud_daemon.py
-    envVars:
-      - key: PYTHON_VERSION
-        value: 3.11.0
+  # ---------------------------------------------------------------------------
+  # LƯU Ý (tối ưu Render Free):
+  # Cron job "tiktok-monitor" bên dưới chạy `python cloud_daemon.py` mỗi 5 phút, trong khi
+  # cloud_daemon mặc định chạy 210 phút/lần => nếu được kích hoạt sẽ tạo hàng chục tiến trình
+  # daemon ghi hình CHỒNG NHAU, tranh chấp cùng streamer/Drive API và đốt CPU/RAM của Render.
+  # Việc ghi hình 24/7 đã do GitHub Actions đảm nhiệm (recorder.yml). Render Free KHÔNG có
+  # Cron Jobs (tính năng trả phí), nên khối này là cấu hình chết. Tạm vô hiệu hóa để tránh
+  # vô tình bật lại gây quá tải tài nguyên. Chỉ bật lại nếu dùng Render gói trả phí + đổi
+  # startCommand thành `python cloud_daemon.py --duration-minutes 4`.
+  # - type: cron
+  #   name: tiktok-monitor
+  #   env: python
+  #   schedule: "*/5 * * * *"  # Every 5 minutes
+  #   buildCommand: pip install -r requirements.txt
+  #   startCommand: python cloud_daemon.py --duration-minutes 4
+  #   envVars:
+  #     - key: PYTHON_VERSION
+  #       value: 3.11.0

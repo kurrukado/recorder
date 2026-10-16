@@ -214,6 +214,10 @@ extract_middle_thumbnail = auto_h264.extract_middle_thumbnail
 LIVE_CACHE = {}  # {username: {"is_live": bool, "room_id": str, "is_sub_only": bool, "is_preview": bool, "timestamp": float}}
 LIVE_CACHE_TTL = 60.0  # Cache 60 giây — frontend poll mỗi 25s sẽ dùng cache, giảm tải RAM và network
 LIVE_CACHE_OFFLINE_TTL = 15.0  # Cache 15 giây khi streamer offline để phát hiện live mới tức thì
+# Ngưỡng thời lượng tối thiểu để coi việc "mất tín hiệu" là streamer xuống live thật.
+# Dưới ngưỡng này => đứt CDN/nhận diện thoáng qua, KHÔNG chờ xác nhận offline dài (tốn RAM/CPU
+# và spam heartbeat Drive) trên Render Free 512MB.
+MIN_OFFLINE_CONFIRM_SECONDS = 15
 
 def get_user_live_details_cached(user: str, force_refresh: bool = False) -> dict:
     user = user.strip().replace("@", "").lower()
@@ -1403,8 +1407,14 @@ def bg_record_worker(user: str, duration: Optional[int] = None, stop_event: Opti
                         room_id = curr_det.get("room_id")
                     print(f"[⏩] [@{user}] Luồng tạm gián đoạn sau {dur:.1f}s nhưng streamer VẪN ĐANG LIVE. Tự động thu tiếp nối vào Phần {part_number} (còn thiếu {MAX_CHUNK_SECONDS - int(accumulated_seconds)}s)...")
                 else:
-                    # Streamer ngắt live khi chưa đủ 1:00:00 -> Chờ đúng 5 phút (300s) xác nhận offline chắc chắn
                     cfg_offline_wait = load_config().get("offline_confirm_seconds", 300)
+                    # Chưa thu được video nào => đứt CDN/nhận diện thoáng qua, KHÔNG phải xuống live
+                    # thật. Bỏ qua chờ xác nhận offline dài để tránh spam heartbeat + tốn RAM/CPU trên
+                    # Render Free; để bộ đếm lỗi liên tiếp kết thúc phiên sớm.
+                    if not part_segments and accumulated_seconds < MIN_OFFLINE_CONFIRM_SECONDS:
+                        print(f"[↩️] [@{user}] Tín hiệu live thoáng ngắt khi CHƯA thu được video ({accumulated_seconds:.1f}s). Bỏ qua chờ xác nhận offline, thử lại ngay...")
+                        continue
+                    # Streamer ngắt live khi chưa đủ 1:00:00 -> Chờ đúng 5 phút (300s) xác nhận offline chắc chắn
                     print(f"[⏳] [@{user}] Tín hiệu live tạm ngắt sau {accumulated_seconds:.1f}s (< 1:00:00). Bắt đầu chờ {cfg_offline_wait//60} phút ({cfg_offline_wait}s) xác nhận offline...")
                     streamer_reconnected = False
                     offline_checks = max(1, int(cfg_offline_wait / 15))

@@ -45,21 +45,6 @@ def log(msg):
 _CONFIG_USERS_LOCK = threading.RLock()
 
 # save_config() is imported from shared_config
-# save_config() is imported from shared_config
-# save_config() is imported from shared_config
-# save_config() is imported from shared_config
-# save_config() is imported from shared_config
-# save_config() is imported from shared_config
-# save_config() is imported from shared_config
-# save_config() is imported from shared_config
-# save_config() is imported from shared_config
-# save_config() is imported from shared_config
-# save_config() is imported from shared_config
-# save_config() is imported from shared_config
-# save_config() is imported from shared_config
-# save_config() is imported from shared_config
-# save_config() is imported from shared_config
-# save_config() is imported from shared_config
 
 _LAST_DRIVE_CHECK = 0
 _CACHED_DRIVE_USERS = None
@@ -213,7 +198,19 @@ except Exception:
 # (ffmpeg lỗi, mạng lỗi, ...) thì mỗi vòng lặp ~15s sẽ khởi động lại + gửi 1 tin
 # Telegram -> spam không kiểm soát. Chờ đủ thời gian này rồi mới khởi động lại.
 USER_START_COOLDOWN_SECONDS = 30
+# Trần backoff lũy tiến: streamer liên tục thất bại sẽ bị giãn thời gian thử lại
+# (30s -> 60s -> 120s -> 240s -> 480s) thay vì quay số mỗi 30s suốt phiên 170 phút.
+MAX_START_COOLDOWN_SECONDS = 480
+# Sau N phiên ghi hình liên tiếp KHÔNG thu được giây video nào, tạm bỏ qua streamer
+# này tới hết phiên daemon (tự reset ở runner kế tiếp) để tiết kiệm CPU/Drive API.
+MAX_USER_SESSION_FAILURES = 3
+# Ngưỡng thời lượng tối thiểu để coi việc "mất tín hiệu" là streamer xuống live thật.
+# Dưới ngưỡng này => coi là đứt CDN/nhận diện thoáng qua, KHÔNG chờ xác nhận offline dài.
+MIN_OFFLINE_CONFIRM_SECONDS = 15
 _USER_START_COOLDOWN = {}       # {user: last_start_ts}
+_USER_FAILURE_STREAK = {}       # {user: số phiên liên tiếp không thu được giây nào}
+_SESSION_SKIP_USERS = set()     # {user} tạm bỏ qua trong phiên daemon hiện tại
+_WORKER_OUTCOME = {}            # {user: {"produced": bool, "stopped": bool}}
 
 
 def _fetch_stream_candidates_for_worker(room_id, user=None, session=None):
@@ -265,6 +262,7 @@ def streamer_recording_worker(user, initial_room_id, auto_discover=True, stop_ev
     consecutive_failures = 0
     max_consecutive_failures = 8
     record_counter = 0
+    produced_content = False  # Đã thu được ít nhất 1 giây video hợp lệ trong phiên này?
 
     # Kiểm tra xem buổi live có phải VIP Sub-only không qua check_live_details
     live_details = recorder_core.check_live_details(user)
@@ -466,6 +464,7 @@ def streamer_recording_worker(user, initial_room_id, auto_discover=True, stop_ev
                         pass
 
                     consecutive_failures = 0
+                    produced_content = True
                     part_segments.append(rec_result)
                     accumulated_seconds += v_dur
                     record_counter += 1
@@ -520,8 +519,17 @@ def streamer_recording_worker(user, initial_room_id, auto_discover=True, stop_ev
                         is_sub_only = True
                     log(f"⏩ [@{user}] Luồng tạm gián đoạn sau {v_dur:.1f}s nhưng streamer VẪN ĐANG LIVE. Tự động thu tiếp nối vào Phần {part_number} (còn thiếu {MAX_CHUNK_SECONDS - int(accumulated_seconds)}s)...")
                 else:
-                    # Streamer ngắt live khi chưa đủ 1:00:00 -> Chờ đúng 5 phút (300s) xác nhận offline chắc chắn
                     cfg_offline_wait = recorder_core.load_config().get("offline_confirm_seconds", 300)
+                    # Chưa thu được video nào (part_segments rỗng ~ 0.0s) => gần như chắc chắn là
+                    # nhận diện live/đứt CDN thoáng qua, KHÔNG phải streamer xuống live thật.
+                    # Chờ xác nhận offline đủ 300s lúc này chỉ tạo ~20 heartbeat Drive vô ích mỗi
+                    # lần (đúng như log "Tín hiệu live tạm ngắt sau 0.0s"). Bỏ qua chờ dài để bộ đếm
+                    # consecutive_failures kết thúc phiên sớm và daemon backoff, giải phóng slot ghi.
+                    if not part_segments and accumulated_seconds < MIN_OFFLINE_CONFIRM_SECONDS:
+                        log(f"↩️ [@{user}] Tín hiệu live thoáng ngắt khi CHƯA thu được video "
+                            f"({accumulated_seconds:.1f}s). Bỏ qua chờ xác nhận offline {cfg_offline_wait}s, thử lại ngay...")
+                        continue
+                    # Streamer ngắt live khi chưa đủ 1:00:00 -> Chờ đúng 5 phút (300s) xác nhận offline chắc chắn
                     log(f"⏳ [@{user}] Tín hiệu live tạm ngắt sau {accumulated_seconds:.1f}s (< 1:00:00). Bắt đầu chờ {cfg_offline_wait//60} phút ({cfg_offline_wait}s) xác nhận offline...")
                     streamer_reconnected = False
                     offline_checks = max(1, int(cfg_offline_wait / 15))
@@ -798,6 +806,12 @@ def streamer_recording_worker(user, initial_room_id, auto_discover=True, stop_ev
         if stale_worker:
             log(f"⚠️ [@{user}] Luồng cũ kết thúc nhưng không còn là luồng đang đăng ký. Bỏ qua cập nhật trạng thái để không ảnh hưởng luồng mới.")
         else:
+            # Ghi lại kết quả phiên để daemon tính backoff + tạm bỏ qua streamer "độc"
+            # (liên tục 0 giây) thay vì quay số suốt phiên 170 phút.
+            _WORKER_OUTCOME[user] = {
+                "produced": produced_content,
+                "stopped": bool(stop_event and stop_event.is_set()),
+            }
             try:
                 gdrive_manager.set_user_recording_status_drive(user, False)
             except Exception:
@@ -879,6 +893,26 @@ def run_daemon(max_minutes=210, interval=25, auto_discover=True):
                 ACTIVE_RECORDERS.pop(u, None)
             active_now = list(ACTIVE_RECORDERS.keys())
 
+        # Đọc kết quả các phiên vừa kết thúc -> cập nhật backoff và danh sách tạm bỏ qua.
+        # Lưu ý: worker tự gỡ khỏi ACTIVE_RECORDERS trong finally, nên phải quét theo
+        # _WORKER_OUTCOME (không dựa vào dead_users) để không bỏ sót kết quả.
+        for u_done in list(_WORKER_OUTCOME.keys()):
+            if u_done in ACTIVE_RECORDERS:
+                continue  # Đang có luồng mới chạy cho user này -> để luồng mới ghi đè kết quả.
+            outcome = _WORKER_OUTCOME.pop(u_done, None)
+            if not outcome or outcome.get("stopped"):
+                # Không tính là thất bại nếu luồng bị dừng do DRAIN/xóa streamer.
+                continue
+            if outcome.get("produced"):
+                _USER_FAILURE_STREAK.pop(u_done, None)
+            else:
+                streak = _USER_FAILURE_STREAK.get(u_done, 0) + 1
+                _USER_FAILURE_STREAK[u_done] = streak
+                if streak >= MAX_USER_SESSION_FAILURES:
+                    _SESSION_SKIP_USERS.add(u_done)
+                    log(f"🚫 [@{u_done}] Đã {streak} phiên liên tiếp không thu được video nào. "
+                        f"Tạm bỏ qua tới hết phiên chạy này để tiết kiệm CPU & Drive API.")
+
         # Gửi Heartbeat lên Google Drive và Supabase cho tất cả các streamer đang quay thực tế (batch 1 request)
         if session_count % 2 == 0 and active_now:
             try:
@@ -948,7 +982,7 @@ def run_daemon(max_minutes=210, interval=25, auto_discover=True):
             # Dọn dẹp _USER_START_COOLDOWN định kỳ để tránh rò rỉ RAM
             now_ts_cd = time.time()
             for u_cd in list(_USER_START_COOLDOWN.keys()):
-                if now_ts_cd - _USER_START_COOLDOWN[u_cd] > USER_START_COOLDOWN_SECONDS * 2:
+                if now_ts_cd - _USER_START_COOLDOWN[u_cd] > MAX_START_COOLDOWN_SECONDS * 2:
                     _USER_START_COOLDOWN.pop(u_cd, None)
 
             # Lấy danh sách streamer bị đánh dấu deleted từ Supabase để tự động gỡ nếu tài khoản còn sống
@@ -991,8 +1025,12 @@ def run_daemon(max_minutes=210, interval=25, auto_discover=True):
             except Exception:
                 pass
 
-        # Ưu tiên các streamer mới nhất (ở cuối danh sách) lên đầu hàng đợi kiểm tra
-        users_to_check = [u for u in reversed(users) if u not in active_set and u not in drive_busy_users]
+        # Ưu tiên các streamer mới nhất (ở cuối danh sách) lên đầu hàng đợi kiểm tra.
+        # Bỏ qua các streamer đã bị tạm khóa trong phiên này (_SESSION_SKIP_USERS).
+        users_to_check = [
+            u for u in reversed(users)
+            if u not in active_set and u not in drive_busy_users and u not in _SESSION_SKIP_USERS
+        ]
 
         if (not draining) and users_to_check and slots_available > 0:
             import concurrent.futures
@@ -1081,12 +1119,17 @@ def run_daemon(max_minutes=210, interval=25, auto_discover=True):
                 if not (is_live and room_id):
                     continue
 
-                # Chống lặp khởi động lại vô hạn (và gửi Telegram mỗi vòng)
+                # Chống lặp khởi động lại vô hạn (và gửi Telegram mỗi vòng).
+                # Backoff lũy tiến: mỗi phiên thất bại liên tiếp nhân đôi thời gian chờ.
                 last_start = _USER_START_COOLDOWN.get(user, 0.0)
                 since_start = time.time() - last_start
-                if last_start and since_start < USER_START_COOLDOWN_SECONDS:
+                streak = _USER_FAILURE_STREAK.get(user, 0)
+                backoff_mult = 2 ** max(0, streak - 1)
+                required_cooldown = min(USER_START_COOLDOWN_SECONDS * backoff_mult, MAX_START_COOLDOWN_SECONDS)
+                if last_start and since_start < required_cooldown:
                     log(f"⏳ [@{user}] Luồng vừa khởi động {int(since_start)}s trước mà đã tắt. "
-                        f"Chờ {int(USER_START_COOLDOWN_SECONDS - since_start)}s nữa mới khởi động lại (chống lặp).")
+                        f"Chờ {int(required_cooldown - since_start)}s nữa mới khởi động lại "
+                        f"(chống lặp, backoff x{backoff_mult}).")
                     continue
 
                 stop_ev = threading.Event()

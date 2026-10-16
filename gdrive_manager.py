@@ -30,6 +30,15 @@ _FOLDER_CACHE = {}
 _FOLDER_CACHE_LOCK = threading.Lock()
 _DRIVE_STATUS_LOCK = threading.Lock()
 
+# Gộp các heartbeat "đang ghi" trùng lặp để tiết kiệm Google Drive API quota.
+# Mỗi lần ghi active_recordings.json tốn 2-3 request (GET list + GET content + PATCH).
+# Trong lúc chờ xác nhận offline, worker gọi lại mỗi 15s -> trước đây có thể tới ~20 lần
+# cho 1 streamer cho 1 lần chờ. Ngưỡng này giữ heartbeat vẫn "tươi" (TTL dedup 45s) mà
+# giảm mạnh số request. Chỉ áp dụng cho is_recording=True; việc GỠ trạng thái luôn ghi ngay.
+_HEARTBEAT_MIN_INTERVAL = 30.0
+_LAST_HEARTBEAT_TS = 0.0
+_LAST_HEARTBEAT_KEY = None
+
 def evict_folder_cache(folder_id=None, folder_name=None):
     """Xóa các mục cache thư mục khỏi _FOLDER_CACHE khi bị xóa hoặc vô hiệu."""
     with _FOLDER_CACHE_LOCK:
@@ -729,7 +738,19 @@ def set_users_recording_status_drive(users: list, is_recording: bool = True, acc
     """
     if not users:
         return True
+    global _LAST_HEARTBEAT_TS, _LAST_HEARTBEAT_KEY
+    clean_users = tuple(sorted({str(u).strip().replace("@", "").lower() for u in users if str(u).strip()}))
+    hb_key = (clean_users, bool(is_recording))
     with _DRIVE_STATUS_LOCK:
+        # Bỏ qua heartbeat "đang ghi" trùng lặp trong khoảng _HEARTBEAT_MIN_INTERVAL.
+        # Không throttle is_recording=False (cần gỡ trạng thái ngay) để API không hiển thị sai.
+        if (
+            is_recording
+            and clean_users
+            and _LAST_HEARTBEAT_KEY == hb_key
+            and (time.monotonic() - _LAST_HEARTBEAT_TS) < _HEARTBEAT_MIN_INTERVAL
+        ):
+            return True
         try:
             if not access_token:
                 access_token = get_access_token()
@@ -818,6 +839,8 @@ def set_users_recording_status_drive(users: list, is_recording: bool = True, acc
                 up_url = f"https://www.googleapis.com/upload/drive/v3/files/{file_id}?uploadType=media"
                 with requests.patch(up_url, headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}, data=content_bytes, timeout=10) as patch_res:
                     if patch_res.status_code == 200:
+                        _LAST_HEARTBEAT_TS = time.monotonic()
+                        _LAST_HEARTBEAT_KEY = hb_key
                         return True
                     if patch_res.status_code != 404:
                         return False
@@ -829,7 +852,11 @@ def set_users_recording_status_drive(users: list, is_recording: bool = True, acc
             }
             create_url = "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart"
             with requests.post(create_url, headers={"Authorization": f"Bearer {access_token}"}, files=files_data, timeout=10) as post_res:
-                return post_res.status_code in [200, 201]
+                if post_res.status_code in [200, 201]:
+                    _LAST_HEARTBEAT_TS = time.monotonic()
+                    _LAST_HEARTBEAT_KEY = hb_key
+                    return True
+                return False
         except Exception as e:
             print(f"[!] Lỗi cập nhật active_recordings lên Drive: {e}")
             return False
