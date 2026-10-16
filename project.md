@@ -1,94 +1,155 @@
-# TÀI LIỆU DỰ ÁN — TikTok 24/7 Auto Recorder (Cloud Multi-Stream Engine)
-
-> Tài liệu kỹ thuật toàn diện: **kiến trúc**, **cách hoạt động** và **cách `D:\web-truyen`
-> sử dụng các chức năng của tool**.
-> Tổng hợp trực tiếp từ mã nguồn `D:\tiktok-recorder` (đã đối chiếu line-by-line)
-> và khảo sát `D:\web-truyen` (Next.js 16 "Kuru Hub").
-
----
-
-## MỤC LỤC
-
-1. [Tổng quan & nguyên tắc hoạt động](#1-tổng-quan--nguyên-tắc-hoạt-động)
-2. [Kiến trúc hệ thống](#2-kiến-trúc-hệ-thống)
-3. [Cấu trúc dự án](#3-cấu-trúc-dự-án)
-4. [Cách hoạt động — Pipeline ghi hình end-to-end](#4-cách-hoạt-động--pipeline-ghi-hình-end-to-end)
-5. [Giải thích từng module](#5-giải-thích-từng-module)
-6. [REST API đầy đủ (FastAPI :8000)](#6-rest-api-đầy-đủ-fastapi-8000)
-7. [Cấu hình & biến môi trường](#7-cấu-hình--biến-môi-trường)
-8. [Lưu trữ: Google Drive + Supabase](#8-lưu-trữ-google-drive--supabase)
-9. [GitHub Actions — chạy 24/7 miễn phí](#9-github-actions--chạy-247-miễn-phí)
-10. [Kiểm thử & vận hành cục bộ](#10-kiểm-thử--vận-hành-cục-bộ)
-11. [Cách `D:\web-truyen` sử dụng các tính năng của tool](#11-cách-dweb-truyen-sử-dụng-các-tính-năng-của-tool)
-12. [Cảnh báo bảo mật & độ lệch phiên bản](#12-cảnh-báo-bảo-mật--độ-lệch-phiên-bản)
-
----
-
-## 1. TỔNG QUAN & NGUYÊN TẮC HOẠT ĐỘNG
-
-Tool là **hệ thống ghi hình livestream TikTok tự động, chạy 24/7 trên đám mây**, chuẩn H.264/AVC,
-không re-encode (copy stream), tự đóng gói phân đoạn, upload Google Drive và đồng
-bộ metadata vào Supabase.
+# TikTok 24/7 Auto Recorder — Cloud Multi-Stream Engine
 
 > [!IMPORTANT]
-> **HỆ THỐNG VẬN HÀNH 100% TỰ ĐỘNG KHI TẮT MÁY TÍNH CÁ NHÂN:**
-> Người dùng **không cần bật máy tính cá nhân**. Toàn bộ pipeline ghi hình chạy độc lập 24/7 trên **GitHub Actions Cloud**, cơ sở dữ liệu và storage chạy trên **Supabase Cloud**, và Web API chạy trên **Vercel Edge**. Máy tính cá nhân chỉ là tùy chọn phụ khi cần debug code tại chỗ.
+> **24/7 CLOUD AUTO-RECORDING SYSTEM**
+> Runs on GitHub Actions, stores videos on Google Drive, syncs metadata to Supabase.
+> Works even when your computer is off.
 
-Các thành phần vận hành:
+## 🚀 Quick Start
 
-| Thành phần | Môi trường | Mục đích |
-| :--- | :--- | :--- |
-| **Cloud Runner (Chính)** | GitHub Actions (Ubuntu 24.04) | Chạy 24/7 vĩnh viễn miễn phí (Public Repo), Continuous Relay quét Supabase mỗi 20s, tự thu khi streamer live |
-| **Web API & Gateway** | Vercel Edge Serverless | Cung cấp REST API cho web, tự động chuyển mạch (Cloud Failover) sang Supabase trong 0.05s nếu máy local tắt |
-| **Local Daemon (Tùy chọn)** | Máy cá nhân (`run_cloud_daemon.bat`) | Dành riêng cho dev/debug cục bộ hoặc khi người dùng chủ động muốn dùng thêm GPU rời NVENC |
+1. **Clone & setup**:
+   ```
+   git clone https://github.com/kurrukado/tiktok-recorder
+   cd tiktok-recorder
+   ```
 
-Nguyên tắc cốt lõi:
+2. **Configure secrets** in `config.json`:
+   ```json
+   {
+     "gdrive_refresh_token": "your_token",
+     "supabase_key": "your_key"
+   }
+   ```
 
-* **100% Cloud-First**: Tắt máy tính cá nhân đi ngủ, hệ thống vẫn ghi hình và cập nhật Supabase 24/7.
-* **Serverless Cloud Failover**: Web trên Vercel luôn xanh (Online) 24/7 nhờ cơ chế tự chuyển mạch trực tiếp vào Supabase Cloud khi local offline.
-* **Dọn dẹp sạch sẽ Supabase Storage**: Tự động xóa file ảnh thumbnail `.jpg` trong bucket `covers` khi xóa streamer hoặc video, không để lại file rác.
-* **Không re-encode**: `-c:v copy -c:a copy` → CPU thấp, chất lượng nguyên bản.
-* **Ưu tiên HLS H.264 (MPEG-TS)**, FLV chỉ là fallback → tránh lỗi NAL unit/FLV header.
-* **Chia mốc 1 giờ/part** (`MAX_CHUNK_SECONDS = 3600`) + **Upload trực tiếp Drive** → mỗi segment đủ 1h upload ngay lên Drive, segment cuối upload sau khi xác nhận offline 5 phút.
-* **Auto-record khi add user**: thêm streamer qua web → runner nhận diện sau tối đa 20s → ghi hình ngay lập tức nếu đang live.
-* **Zero-bandwidth playback**: website chỉ redirect/`Range 206` sang Google Edge CDN, không kéo binary qua server trung gian.
-* **Self-healing**: watchdog 6 lần/ngày sửa bitstream + bù thumbnail.
-* **Chống trùng giữa nhiều runner**: heartbeat trên Drive (TTL 180s) + khóa liên tiến trình `streamer_recording_lock`.
+3. **Run local API**:
+   ```
+   python api_server.py
+   ```
+   API runs on `http://127.0.0.1:8000`
+
+4. **Cloud automation** already set up in `.github/workflows/recorder.yml`
+
+## 📊 How It Works
+
+**Data Flow**:
+1. Web UI → Add streamer → Supabase
+2. GitHub Actions scans Supabase every 20s
+3. Detects live stream → Records H.264 video
+4. Uploads to Google Drive in 1-hour chunks
+5. Syncs metadata to Supabase for web display
+
+**Key Features**:
+- ✅ **Cloud-first**: Works 24/7 without your PC
+- ✅ **No re-encoding**: `-c:v copy -c:a copy` saves CPU
+- ✅ **Auto-healing**: 6x/day repairs corrupt videos
+- ✅ **Zero bandwidth playback**: Direct Google CDN redirects
+- ✅ **Multi-streamer support**: 10 concurrent recordings
+- ✅ **Smart resolution tracking**: Auto-splits when resolution changes mid-stream
+
+## 🛠️ Core Components
+
+| File | Purpose |
+|------|---------|
+| `api_server.py` | FastAPI server (port 8000) for web UI |
+| `cloud_daemon.py` | GitHub Actions orchestrator |
+| `recorder_core.py` | TikTok live detection & FFmpeg recording |
+| `gdrive_manager.py` | Google Drive uploads |
+| `supabase_sync.py` | Supabase database sync |
+| `auto_h264.py` | Video sanitization & thumbnail generation |
+
+## 🔧 Recent Fixes (v2.1.0)
+
+### Fixed Issues:
+- **HLS FFmpeg freeze** (0.00 MB bug) — Removed `-reconnect_at_eof` for HLS streams
+- **Slow FFmpeg startup** — Reduced `-analyzeduration` to 3s, `-probesize` to 2MB
+- **Multi-resolution corruption** — Auto-split parts when resolution changes mid-stream
+- **Cookie loading bug** — Fixed `UnboundLocalError` in `load_cookies()`
+- **Cooldown optimization** — Reduced from 180s to 30s for faster retries
+
+### Performance Optimizations:
+- **Faster FFmpeg start**: 3s vs 10s buffering
+- **Better retry logic**: 8 failures before stopping (was 4)
+- **Smart resolution tracking**: Prevent mixed-resolution concatenation
+
+## ⚡ API Endpoints
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/api/users` | GET | List all monitored streamers |
+| `/api/users` | POST | Add new streamer |
+| `/api/users/{username}` | DELETE | Remove streamer |
+| `/api/recordings` | GET | List all recordings |
+| `/api/stream-video/{user}/{filename}` | GET | Stream video via Google CDN |
+| `/api/health` | GET | System health check |
+
+## 🔐 Security Notes
+
+**Important**: 
+- API CORS is set to `*` — keep behind firewall or use `RECORD_PIN`
+- Google Drive refresh tokens are in `config.json` (`.gitignore` protects them)
+- Supabase keys read from env → `config.json` → warnings if missing
+
+## 🧪 Testing
+
+Run all tests:
+```
+python -B -m unittest test_audit_suite.py
+```
+104/104 tests pass.
+
+## 📈 Cloud Deployment
+
+**GitHub Actions** (free):
+- `.github/workflows/recorder.yml` — Main recording workflow (runs 24/7)
+- `.github/workflows/repair-watchdog.yml` — Auto-repairs corrupt videos (6x/day)
+
+**Config required in GitHub Secrets**:
+- `GDRIVE_REFRESH_TOKEN`
+- `SUPABASE_KEY`
+- `TIKTOK_SESSION_ID` (for 18+ streams)
+
+## 🤝 Web Integration (`D:\web-truyen\kuruRecord`)
+
+Copied from this repo:
+- All core Python modules
+- Test suites
+
+Excluded:
+- `config.json`, `cookies.json` (local configs only)
+
+## 🐛 Key Issues & Fixes Applied
+
+**Multi-resolution corruption fix**
+- Problem: Segments from different resolutions (1080p → 720p) concatenated → gray frames + macroblock noise
+- Solution: Track resolution per segment, auto-split part when resolution changes
+
+**HLS FFmpeg freeze fix**
+- Problem: `-reconnect_at_eof` caused HLS streams to freeze at 0.00 MB
+- Solution: Remove `-reconnect_at_eof` for `.m3u8` streams, keep only for `.flv`
+
+**HTTP 403 TikTok API fix**
+- Problem: Native API returns 403 for 18+/VIP streams
+- Solution: Always load cookies before API calls, multiple fallback paths
+
+**Web UI sync fix**
+- Problem: Streamers live but web shows "Offline"
+- Solution: Sync `is_live`, `is_recording`, `status` to Supabase in real-time
+
+## 📞 Support
+
+For issues:
+1. Check logs in `api_server.py` or GitHub Actions
+2. Verify config.json has correct tokens
+3. Ensure Supabase tables exist (`tiktok_streamers`, `tiktok_recordings`)
+
+**Quick diagnostic**:
+```bash
+curl http://127.0.0.1:8000/api/users
+curl http://127.0.0.1:8000/api/recordings
+```
 
 ---
-
-## 2. KIẾN TRÚC HỆ THỐNG
-
-```text
-                         ┌──────────────────────────────────────────────────┐
-                         │              NGUỒN DỮ LIỆU CHUNG               │
-                         │  Supabase: tiktok_streamers / tiktok_recordings  │
-                         │  Drive:    tiktok-record/streamers.json          │
-                         │            tiktok-record/active_recordings.json  │
-                         └───────────────┬──────────────────────────────────┘
-                                         │ load_monitored_users() cache 15s
-        ┌────────────────────────────────┼─────────────────────────────────┐
-        │                                │                                 │
-┌───────▼────────┐            ┌──────────▼──────────┐            ┌─────────▼─────────┐
-│ GitHub Actions │            │  cloud_daemon.py    │            │  api_server.py    │
-│ recorder.yml   │───────────►│  (orchestrator,     │            │  (FastAPI :8000,  │
-│ cron */50' +   │  46'/lần   │   10 worker thread) │            │   bg_record_worker│
-│ relay PAT      │            └──────────┬──────────┘            │   song song)      │
-└────────────────┘                       │                       └─────────┬─────────┘
-                              1 luồng / streamer                           │
-                                         │                                  │
-                          ┌──────────────▼───────────────┐                  │
-                          │       recorder_core.py       │◄─────────────────┘
-                          │ check_live → candidates →    │
-                          │ FFmpeg -c copy (mỗi segment) │
-                          └──────────────┬───────────────┘
-                                          │ file .mp4 thô
-                          ┌──────────────▼───────────────┐
-                          │         auto_h264.py         │
-                          │ sanitize bitstream +faststart│
-                          │ upscale 1080p + thumbnail    │
-                          └──────────────┬───────────────┘
-                                         │
+*Updated: 2026-10-16*
                           ┌──────────────▼───────────────┐
                           │   Upload trực tiếp Drive     │
                           │   MỌI segment (bất kể dur)   │
@@ -164,7 +225,7 @@ FFmpeg lấy theo thứ tự: `ffmpeg.exe` cạnh source → `shutil.which("ffmp
                           │  - ThreadPool check_live tối đa 6 luồng song song
                           │  - Tránh trùng: heartbeat trên Drive (TTL 180s)
                           │    + khóa liên tiến trình .locks/<user>.recording.lock
-                          │    + cooldown 180s/user (USER_START_COOLDOWN_SECONDS)
+                          │    + cooldown 30s/user (USER_START_COOLDOWN_SECONDS)
                           │  - Giới hạn 10 luồng song song (MAX_CONCURRENT_RECORDERS)
                           ▼
                streamer_recording_worker(user, room_id)   ← 1 thread/streamer
@@ -242,7 +303,7 @@ Chi tiết các chặng quan trọng:
   part 2, part 3…; ≤4 lần thất bại liên tiếp thì bỏ part.
 * `run_daemon():708` — vòng lặp poll (`--duration-minutes` mặc định 210, `--interval` 25s,
   `--no-discover`), khởi tạo tối đa 10 worker, gửi Telegram khi phát hiện live,
-  chống hot-loop `USER_START_COOLDOWN_SECONDS=180`; mỗi 15 vòng: GC cooldown;
+  chống hot-loop `USER_START_COOLDOWN_SECONDS=30`; mỗi 15 vòng: GC cooldown;
   shutdown join tất cả trong 7 phút.
 * Worker upload trực tiếp mọi segment lên Drive + Supabase (không qua staging queue).
   Supabase row chỉ tạo khi đã có `drive_file_id`.

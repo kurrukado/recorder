@@ -12,6 +12,11 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional, Tuple
 from curl_cffi import requests
 
+# Import shared modules
+import constants
+from shared_config import load_config, save_config, save_config_fields, load_cookies, save_cookies
+from logging_utils import print_with_timestamp, print_error, print_success
+
 if sys.platform == "win32":
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -19,8 +24,11 @@ if sys.platform == "win32":
     except Exception:
         pass
 
+# Use constants from shared module
+BASE_DIR = constants.BASE_DIR
+CONFIG_FILE = constants.CONFIG_FILE
+COOKIES_FILE = constants.COOKIES_FILE
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 try:
     import imageio_ffmpeg
     IMGIO_FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
@@ -32,25 +40,17 @@ if sys.platform == "win32":
     FFMPEG_PATH = win_ffmpeg if os.path.exists(win_ffmpeg) else (shutil.which("ffmpeg") or IMGIO_FFMPEG or "ffmpeg")
 else:
     FFMPEG_PATH = shutil.which("ffmpeg") or IMGIO_FFMPEG or "/usr/bin/ffmpeg"
-COOKIES_FILE = os.path.join(BASE_DIR, "cookies.json")
-CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
 
-DEFAULT_CONFIG = {
-    "target_user": "islizanx",
-    "check_interval_seconds": 20,
-    "quality": "best",
-    "output_dir": ".",
+# Use default config from constants (extended for backward compatibility)
+DEFAULT_CONFIG = constants.DEFAULT_CONFIG.copy()
+# Add any recorder-specific defaults that aren't in constants
+DEFAULT_CONFIG.update({
     "telegram_enabled": False,
     "telegram_bot_token": "",
     "telegram_chat_id": "",
-    "gdrive_enabled": False,
     "gdrive_remote": "gdrive",
     "gdrive_delete_local": False,
-    "auto_upscale_1080p": True,
-    "max_recording_seconds": 3600,
-    "offline_confirm_seconds": 300,
-    "timezone_offset_hours": 7
-}
+})
 
 def get_app_timezone():
     """
@@ -76,97 +76,16 @@ def get_now_str(fmt="%Y-%m-%d_%H-%M-%S") -> str:
     """Trả về chuỗi ngày giờ hiện tại chuẩn xác theo múi giờ (GMT+7)."""
     return get_now_local().strftime(fmt)
 
-def load_config():
-    if os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-                return {**DEFAULT_CONFIG, **cfg}
-        except Exception:
-            pass
-    return DEFAULT_CONFIG.copy()
+# Configuration functions are imported from shared_config.py
+# These functions are kept for backward compatibility:
+# - load_config()
+# - save_config(cfg)
+# - save_config_fields(updates)
+# - load_cookies()
+# - save_cookies(cookies)
 
-def save_config(cfg):
-    # Khóa liên tiến trình (api_server / cloud_daemon / tiktok_recorder cùng ghi file này)
-    from config_lock import config_transaction
-    with config_transaction():
-        tmp_path = CONFIG_FILE + ".tmp"
-        try:
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(cfg, f, indent=4, ensure_ascii=False)
-            os.replace(tmp_path, CONFIG_FILE)
-        except Exception as e:
-            print(f"[!] Lỗi ghi config: {e}")
-            if os.path.exists(tmp_path):
-                try: os.remove(tmp_path)
-                except Exception: pass
-
-def save_config_fields(updates):
-    """
-    Ghi MỘT SỐ key thay đổi, không ghi đè cả file.
-    Dùng cho các màn hình CLI đọc config lúc bắt đầu (có thể ngồi vài phút ở menu)
-    rồi lưu lại: nếu lưu cả bản đọc lúc đầu sẽ xoá mất streamer mà api_server
-    vừa thêm vào monitored_users trong lúc người dùng đang thao tác.
-    """
-    if not updates:
-        return
-    from config_lock import config_transaction
-    with config_transaction():
-        cfg = load_config()
-        cfg.update(updates)
-        save_config(cfg)
-
-def load_cookies():
-    cookies = {}
-    cookie_paths = [
-        COOKIES_FILE,
-        os.path.join(os.path.dirname(BASE_DIR), "web-truyen", "kuruRecord", "cookies.json")
-    ]
-    for cp in cookie_paths:
-        if os.path.exists(cp):
-            try:
-                with open(cp, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    for k, v in data.items():
-                        if v:
-                            cookies[k] = str(v).strip()
-                    if cookies:
-                        break
-            except Exception:
-                pass
-
-    if not cookies:
-        env_session = os.environ.get("TIKTOK_SESSION_ID", "").strip()
-        if env_session:
-            cookies = {"sessionid_ss": env_session, "sessionid": env_session}
-
-    if not cookies:
-        try:
-            cfg = load_config()
-            cfg_session = (cfg.get("tiktok_session_id") or cfg.get("sessionid_ss") or "").strip()
-            if cfg_session:
-                cookies = {"sessionid_ss": cfg_session, "sessionid": cfg_session}
-        except Exception:
-            pass
-
-    # Luôn gán tt-target-idc để tránh Akamai EdgeSuite Access Denied trên TikTok Native Live API
-    if isinstance(cookies, dict):
-        cookies.setdefault("tt-target-idc", "useast1a")
-    else:
-        cookies = {"tt-target-idc": "useast1a"}
-    return cookies
-
-def save_cookies(cookies_dict):
-    tmp_path = COOKIES_FILE + ".tmp"
-    try:
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(cookies_dict, f, indent=4, ensure_ascii=False)
-        os.replace(tmp_path, COOKIES_FILE)
-    except Exception as e:
-        print(f"[!] Lỗi ghi cookies: {e}")
-        if os.path.exists(tmp_path):
-            try: os.remove(tmp_path)
-            except Exception: pass
+# load_cookies() and save_cookies() are imported from shared_config.py
+# They provide enhanced functionality with multiple cookie path checking
 
 def generate_guest_session(proxy: Optional[str] = None) -> requests.Session:
     """
@@ -1126,8 +1045,8 @@ def record_stream_ffmpeg(stream_url, output_filename=None, target_user="islizanx
     cmd.extend([
         "-correct_ts_overflow", "1",
         "-fflags", "+genpts+discardcorrupt+nobuffer",
-        "-analyzeduration", "8000000",
-        "-probesize", "8000000",
+        "-analyzeduration", "3000000",
+        "-probesize", "2000000",
         "-headers", (
             "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36\r\n"
             "Referer: https://www.tiktok.com/\r\n"

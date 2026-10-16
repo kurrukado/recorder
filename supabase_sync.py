@@ -7,6 +7,10 @@ from datetime import datetime, timezone
 from typing import Optional, Union
 import requests
 
+# Import shared modules
+import constants
+from shared_config import get_config_value
+
 if sys.platform == "win32":
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -14,19 +18,19 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# Use constants from shared module
+_BASE_DIR = constants.BASE_DIR
 
 def _secret_from_config(key_name: str) -> str:
     """
     Đọc bí mật từ config.json (đã .gitignore, không track trong git).
     KHÔNG hardcode key trong source: repo chạy công khai trên GitHub Actions
     thì mọi người đều đọc được key commit trong mã nguồn.
+    
+    Note: This function is kept for backward compatibility.
+    Use get_config_value(key_name) from shared_config for new code.
     """
-    try:
-        with open(os.path.join(_BASE_DIR, "config.json"), "r", encoding="utf-8") as f:
-            return str(json.load(f).get(key_name, "") or "")
-    except Exception:
-        return ""
+    return get_config_value(key_name, "")
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://jetwtqakyxjcffbwhhot.supabase.co").rstrip("/")
 SUPABASE_KEY = (

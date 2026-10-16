@@ -16,6 +16,11 @@ from pydantic import BaseModel
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, RedirectResponse
+
+# Import shared modules
+import constants
+from shared_config import load_config, save_config, save_config_fields, load_cookies, save_cookies, get_config_value
+from logging_utils import print_with_timestamp, print_error, print_success
 from config_lock import config_transaction
 
 
@@ -26,8 +31,10 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
+# Use constants from shared module
+BASE_DIR = constants.BASE_DIR
+CONFIG_FILE = constants.CONFIG_FILE
+
 try:
     import imageio_ffmpeg
     IMGIO_FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
@@ -161,29 +168,10 @@ async def enforce_pin_on_mutations(request: Request, call_next):
 # (thêm 1 streamer / xóa 1 streamer / start_record tự thêm user) sẽ làm mất 1 trong 2 thay đổi.
 # config_transaction() cũng khóa liên tiến trình với cloud_daemon / tiktok_recorder.
 
-def load_config():
-    if os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {
-        "monitored_users": ["islizanx", "itsme_kate0110", "urielhui38", "fmmaidcoffee"],
-        "check_interval_seconds": 20
-    }
-
-def save_config(cfg):
-    tmp_path = CONFIG_FILE + ".tmp"
-    try:
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, indent=4, ensure_ascii=False)
-        os.replace(tmp_path, CONFIG_FILE)
-    except Exception as e:
-        print(f"[!] Lỗi ghi config: {e}")
-        if os.path.exists(tmp_path):
-            try: os.remove(tmp_path)
-            except Exception: pass
+# Configuration functions are imported from shared_config.py
+# - load_config()
+# - save_config(cfg)
+# - save_config_fields(updates)
 
 _DURATION_CACHE = {}
 _DURATION_CACHE_LOCK = threading.Lock()
@@ -1272,6 +1260,7 @@ def bg_record_worker(user: str, duration: Optional[int] = None, stop_event: Opti
             part_segments = []
             accumulated_seconds = 0.0
             offline_confirmed = False
+            part_ref_resolution = None  # Khởi tạo độ phân giải tham chiếu cho part hiện tại
             print(f"[🔴] [@{user}] Bắt đầu tích lũy Phần {part_number} (Tối đa 1 tiếng: {MAX_CHUNK_SECONDS}s)...")
 
             while accumulated_seconds < (300 if is_sub_only else MAX_CHUNK_SECONDS):
@@ -1356,6 +1345,28 @@ def bg_record_worker(user: str, duration: Optional[int] = None, stop_event: Opti
                                 print(f"[⚠️] [@{user}] Luồng #{cand_idx+1} không đạt chuẩn ({reason}). Fallback sang luồng dự phòng #{cand_idx+2}...")
 
                 if is_valid:
+                    # Chống ghép segment khác độ phân giải vào cùng một part (12.3 — multi-res fix)
+                    # Khi stream candidate rơi tier (1080p → 720p), phải tách part ngay thay vì ghép file
+                    # lệch chuẩn khiến khung hình xám + nhiễu macroblock sau khi concat.
+                    try:
+                        from auto_h264 import get_video_resolution
+                        seg_w, seg_h, _ = get_video_resolution(rec_res)
+                        if seg_w and seg_h:
+                            if not part_segments:
+                                part_ref_resolution = (seg_w, seg_h)
+                            elif part_ref_resolution and (seg_w, seg_h) != part_ref_resolution:
+                                print(f"[⚠️] [@{user}] Phát hiện ĐỔI ĐỘ PHÂN GIẢI giữa chừng: {part_ref_resolution[0]}x{part_ref_resolution[1]} → {seg_w}x{seg_h}. "
+                                      f"Tự động tách Phần {part_number} tại đây để tránh lỗi khung hình xám/nhiễu macroblock.")
+                                # Chốt part hiện tại TRƯỚC segment mới (không thêm segment mới vào)
+                                # Segment mới sẽ được thu lại ở part tiếp theo
+                                try:
+                                    os.remove(rec_res)
+                                except Exception:
+                                    pass
+                                break
+                    except Exception:
+                        pass
+
                     consecutive_failures = 0
                     part_segments.append(rec_res)
                     accumulated_seconds += dur

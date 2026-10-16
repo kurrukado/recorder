@@ -8,6 +8,10 @@ import webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from config_lock import config_transaction
 
+# Import shared modules
+import constants
+from shared_config import load_config, save_config_fields
+
 if sys.platform == "win32":
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -15,8 +19,9 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
+# Use constants from shared module
+BASE_DIR = constants.BASE_DIR
+CONFIG_FILE = constants.CONFIG_FILE
 
 CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
 CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
@@ -64,13 +69,7 @@ class OAuthHandler(BaseHTTPRequestHandler):
         pass
 
 def get_config_credentials():
-    cfg = {}
-    if os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-        except Exception:
-            pass
+    cfg = load_config()
     client_id = cfg.get("google_client_id") or CLIENT_ID
     client_secret = cfg.get("google_client_secret") or CLIENT_SECRET
     return client_id, client_secret
@@ -160,33 +159,16 @@ def start_oauth_flow(client_id=None, client_secret=None, redirect_uri=REDIRECT_U
 
     if refresh_token:
         print("[✓] Đã lấy Refresh Token thành công!")
-        # Đọc-sửa-ghi phải dưới khóa liên tiến trình + ghi atomic (tmp + replace):
-        # ghi thẳng vào config.json có thể để lại file JSON cụt nếu bị ngắt giữa chừng.
-        with config_transaction():
-            cfg = {}
-            if os.path.exists(CONFIG_FILE):
-                try:
-                    with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                        cfg = json.load(f)
-                except Exception as e:
-                    print(f"[!] config.json không đọc được ({e}) -> bắt đầu với cấu hình rỗng.")
-                    cfg = {}
-            cfg["gdrive_refresh_token"] = refresh_token
-            cfg["google_client_id"] = client_id
-            cfg["google_client_secret"] = client_secret
-            cfg["gdrive_enabled"] = True
-            tmp_path = CONFIG_FILE + ".tmp"
-            try:
-                with open(tmp_path, "w", encoding="utf-8") as f:
-                    json.dump(cfg, f, indent=4, ensure_ascii=False)
-                os.replace(tmp_path, CONFIG_FILE)
-            except Exception as e:
-                print(f"[!] Không ghi được config.json: {e}")
-                if os.path.exists(tmp_path):
-                    try:
-                        os.remove(tmp_path)
-                    except Exception:
-                        pass
+        # Use shared config function which already handles locking and atomic writes
+        success = save_config_fields({
+            "gdrive_refresh_token": refresh_token,
+            "google_client_id": client_id,
+            "google_client_secret": client_secret,
+            "gdrive_enabled": True
+        })
+        
+        if not success:
+            print("[!] Không ghi được config.json")
 
         print("[✓] Đã lưu thông tin cấu hình vào config.json!")
         return access_token, refresh_token

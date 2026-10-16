@@ -3,6 +3,10 @@ import sys
 import json
 import requests
 
+# Import shared modules
+import constants
+from shared_config import load_config, get_config_value
+
 if sys.platform == "win32":
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -10,17 +14,14 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
+# Use constants from shared module
+BASE_DIR = constants.BASE_DIR
+CONFIG_FILE = constants.CONFIG_FILE
 
+# get_notifier_config() is replaced by load_config() from shared_config
+# For backward compatibility:
 def get_notifier_config():
-    if os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {}
+    return load_config()
 
 def send_telegram(message):
     """

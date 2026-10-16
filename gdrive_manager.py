@@ -6,6 +6,10 @@ import time
 import threading
 import requests
 
+# Import shared modules
+import constants
+from shared_config import load_config, save_config
+
 if sys.platform == "win32":
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -13,8 +17,9 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
+# Use constants from shared module
+BASE_DIR = constants.BASE_DIR
+CONFIG_FILE = constants.CONFIG_FILE
 
 CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
 CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
@@ -37,14 +42,7 @@ def evict_folder_cache(folder_id=None, folder_name=None):
             for k in keys_to_del:
                 _FOLDER_CACHE.pop(k, None)
 
-def load_config():
-    if os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {}
+# load_config() is imported from shared_config.py
 
 def get_access_token(force_refresh=False):
     with _TOKEN_LOCK:

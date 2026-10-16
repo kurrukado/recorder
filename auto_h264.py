@@ -7,6 +7,10 @@ import struct
 import re
 from typing import Optional, Tuple
 
+# Import shared modules
+import constants
+from shared_config import load_config
+
 if sys.platform == "win32":
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -14,7 +18,8 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# Use constants from shared module
+BASE_DIR = constants.BASE_DIR
 try:
     import imageio_ffmpeg
     IMGIO_FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()

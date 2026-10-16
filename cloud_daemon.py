@@ -12,8 +12,13 @@ import atexit
 import signal
 from config_lock import config_transaction
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
+# Import shared modules
+import constants
+from shared_config import load_config, save_config, save_config_fields
+from logging_utils import print_with_timestamp, print_error, print_success
+
+# BASE_DIR is imported from constants
+# CONFIG_FILE is imported from constants
 
 import recorder_core
 import gdrive_manager
@@ -27,33 +32,33 @@ def log(msg):
     now = recorder_core.get_now_local().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{now}] {msg}", flush=True)
 
-def load_config():
-    if os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {}
+# load_config() is imported from shared_config
+# load_config() is imported from shared_config
+# load_config() is imported from shared_config
+# load_config() is imported from shared_config
+# load_config() is imported from shared_config
+# load_config() is imported from shared_config
+# load_config() is imported from shared_config
+# load_config() is imported from shared_config
 
 _CONFIG_USERS_LOCK = threading.RLock()
 
-def save_config(cfg):
-    # config_transaction(): khóa liên tiến trình với api_server / tiktok_recorder
-    # cùng đọc-sửa-ghi config.json (chỉ khóa thread trong process này là chưa đủ).
-    with config_transaction():
-        tmp_path = CONFIG_FILE + ".tmp"
-        try:
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(cfg, f, indent=4, ensure_ascii=False)
-            os.replace(tmp_path, CONFIG_FILE)
-        except Exception as e:
-            log(f"[!] Không thể ghi config.json: {e}")
-            if os.path.exists(tmp_path):
-                try:
-                    os.remove(tmp_path)
-                except Exception:
-                    pass
+# save_config() is imported from shared_config
+# save_config() is imported from shared_config
+# save_config() is imported from shared_config
+# save_config() is imported from shared_config
+# save_config() is imported from shared_config
+# save_config() is imported from shared_config
+# save_config() is imported from shared_config
+# save_config() is imported from shared_config
+# save_config() is imported from shared_config
+# save_config() is imported from shared_config
+# save_config() is imported from shared_config
+# save_config() is imported from shared_config
+# save_config() is imported from shared_config
+# save_config() is imported from shared_config
+# save_config() is imported from shared_config
+# save_config() is imported from shared_config
 
 _LAST_DRIVE_CHECK = 0
 _CACHED_DRIVE_USERS = None
@@ -331,6 +336,7 @@ def streamer_recording_worker(user, initial_room_id, auto_discover=True, stop_ev
             part_segments = []
             accumulated_seconds = 0.0
             offline_confirmed = False
+            part_ref_resolution = None  # Khởi tạo độ phân giải tham chiếu cho part hiện tại
             log(f"🔴 [@{user}] Bắt đầu tích lũy Phần {part_number}{' (VIP Sub-Only Preview)' if is_sub_only else f' (Tối đa 1 tiếng: {MAX_CHUNK_SECONDS}s)'}...")
 
             # Vòng lặp thu thập các phân đoạn cho đến khi đủ 1 tiếng hoặc streamer tắt live
@@ -436,6 +442,28 @@ def streamer_recording_worker(user, initial_room_id, auto_discover=True, stop_ev
                         log(f"[!] [@{user}] Thử ghi chế độ Voice Live không thành công: {vl_err}")
 
                 if is_valid:
+                    # Chống ghép segment khác độ phân giải vào cùng một part (12.3 — multi-res fix)
+                    # Khi stream candidate rơi tier (1080p → 720p), phải tách part ngay thay vì ghép file
+                    # lệch chuẩn khiến khung hình xám + nhiễu macroblock sau khi concat.
+                    try:
+                        from auto_h264 import get_video_resolution
+                        seg_w, seg_h, _ = get_video_resolution(rec_result)
+                        if seg_w and seg_h:
+                            if not part_segments:
+                                part_ref_resolution = (seg_w, seg_h)
+                            elif part_ref_resolution and (seg_w, seg_h) != part_ref_resolution:
+                                log(f"⚠️ [@{user}] Phát hiện ĐỔI ĐỘ PHÂN GIẢI giữa chừng: {part_ref_resolution[0]}x{part_ref_resolution[1]} → {seg_w}x{seg_h}. "
+                                    f"Tự động tách Phần {part_number} tại đây để tránh lỗi khung hình xám/nhiễu macroblock.")
+                                # Chốt part hiện tại TRƯỚC segment mới (không thêm segment mới vào)
+                                # Segment mới sẽ được thu lại ở part tiếp theo
+                                try:
+                                    os.remove(rec_result)
+                                except Exception:
+                                    pass
+                                break
+                    except Exception:
+                        pass
+
                     consecutive_failures = 0
                     part_segments.append(rec_result)
                     accumulated_seconds += v_dur
@@ -999,7 +1027,7 @@ def run_daemon(max_minutes=210, interval=25, auto_discover=True):
                                 for x in cfg["monitored_users"]
                             ]
                             save_config(cfg)
-                        with DRIVE_USERS_LOCK:
+                        with _CONFIG_USERS_LOCK:
                             if _CACHED_DRIVE_USERS:
                                 _CACHED_DRIVE_USERS = [
                                     new_username if x == user else x
