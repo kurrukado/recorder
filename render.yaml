@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: tiktok-recorder-api
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn api_server:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: PORT
+        value: 10000
+    autoDeploy: true
+    healthCheckPath: /api/health
+    disk:
+      name: recordings
+      mountPath: /opt/render/project/src/recordings
+      sizeGB: 10
+
+  - type: cron
+    name: tiktok-monitor
+    env: python
+    schedule: "*/5 * * * *"  # Every 5 minutes
+    buildCommand: pip install -r requirements.txt
+    startCommand: python cloud_daemon.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
