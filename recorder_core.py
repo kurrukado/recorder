@@ -990,7 +990,7 @@ def _cleanup_global_procs():
 
 atexit.register(_cleanup_global_procs)
 
-def record_stream_ffmpeg(stream_url, output_filename=None, target_user="islizanx", duration=None, stop_event=None, auto_sync_gdrive=True, is_sub_only: bool = False, allow_audio_only: bool = False):
+def record_stream_ffmpeg(stream_url, output_filename=None, target_user: Optional[str] = None, duration=None, stop_event=None, auto_sync_gdrive=True, is_sub_only: bool = False, allow_audio_only: bool = False):
     """
     Records a live stream URL to an MP4 file using ffmpeg without re-encoding,
     then automatically ensures it is in standard H.264 (AVC) format.
@@ -1002,11 +1002,12 @@ def record_stream_ffmpeg(stream_url, output_filename=None, target_user="islizanx
         cfg = load_config()
         duration = cfg.get("max_recording_seconds", 3600)
 
+    target_user_str = target_user or "streamer"
     now_str = get_now_str("%Y-%m-%d_%H-%M-%S")
     if not output_filename:
-        user_dir = os.path.join(BASE_DIR, target_user)
+        user_dir = os.path.join(BASE_DIR, target_user_str)
         os.makedirs(user_dir, exist_ok=True)
-        output_filename = os.path.join(user_dir, f"{target_user}_{now_str}.mp4")
+        output_filename = os.path.join(user_dir, f"{target_user_str}_{now_str}.mp4")
     else:
         os.makedirs(os.path.dirname(os.path.abspath(output_filename)), exist_ok=True)
 
@@ -1060,6 +1061,7 @@ def record_stream_ffmpeg(stream_url, output_filename=None, target_user="islizanx
         "-dn",
         "-max_interleave_delta", "0",
         "-avoid_negative_ts", "make_zero",
+        "-flush_packets", "1",
     ])
     if duration:
         cmd.extend(["-t", str(duration)])
@@ -1114,9 +1116,10 @@ def record_stream_ffmpeg(stream_url, output_filename=None, target_user="islizanx
                 _safe_stop_ffmpeg(proc, timeout=8)
                 break
 
-            # Fast Failover: Nếu sau 8 giây đầu tiên mà file vẫn rỗng hoặc < 20KB (CDN timeout/treo luồng),
+            # Fast Failover: Nếu sau 18 giây đầu tiên mà file vẫn rỗng hoặc < 20KB (CDN timeout/treo luồng),
             # dừng ngay để chuyển sang luồng dự phòng (fallback candidate) mà không để streamer bị lỡ nhịp.
-            if elapsed >= 8 and size_bytes < 20 * 1024:
+            # Ngưỡng 18s đảm bảo luồng FLV (mất ~13.5s khởi tạo) và HLS xuyên lục địa đủ thời gian nhận keyframe đầu tiên.
+            if elapsed >= 18 and size_bytes < 20 * 1024:
                 print(f"\n\n[⚡ Fast-Failover] [@{target_user}] Không nhận được dữ liệu video sau {elapsed}s (CDN timeout/treo). Chuyển sang luồng dự phòng ngay...")
                 _safe_stop_ffmpeg(proc, timeout=3)
                 break
@@ -1150,10 +1153,6 @@ def record_stream_ffmpeg(stream_url, output_filename=None, target_user="islizanx
             max_stagnant = 30 if size_bytes < 250 * 1024 else 90
             if stagnant_seconds >= max_stagnant:
                 offline_confirmed = False
-                # Rate-limit chung với nhánh kiểm tra phía trên: trước đây nhánh này gọi
-                # check_live_status 1 lần/giây -> 2 HTTP request mỗi giây, và một lỗi mạng
-                # tạm thời (except) bị coi là "đã xuống live" -> chốt segment -> video con
-                # < 250KB bị xóa -> 4 lần liên tiếp là chấm dứt cả phiên ghi hình.
                 if target_user and (now - last_live_check_time) >= 10:
                     last_live_check_time = now
                     try:
@@ -1165,7 +1164,6 @@ def record_stream_ffmpeg(stream_url, output_filename=None, target_user="islizanx
                         else:
                             consecutive_offline_checks = 0
                     except Exception:
-                        # Lỗi kiểm tra = "không rõ", KHÔNG phải "đã offline"
                         print(f"\n[!] [@{target_user}] Không kiểm tra được trạng thái live (lỗi mạng tạm thời). Không chốt phân đoạn vì lý do này.")
                         offline_confirmed = False
                 if offline_confirmed or stagnant_seconds >= 120:
@@ -1173,7 +1171,8 @@ def record_stream_ffmpeg(stream_url, output_filename=None, target_user="islizanx
                     _safe_stop_ffmpeg(proc, timeout=6)
                     break
 
-            sys.stdout.write(f"\r🔴 Đang ghi hình: [{hours:02d}:{mins:02d}:{secs:02d}] - Dung lượng: {size_mb:.2f} MB")
+            tag = f"[@{target_user}] " if target_user else ""
+            sys.stdout.write(f"\r🔴 {tag}Đang ghi hình: [{hours:02d}:{mins:02d}:{secs:02d}] - Dung lượng: {size_mb:.2f} MB")
             sys.stdout.flush()
 
     except KeyboardInterrupt:

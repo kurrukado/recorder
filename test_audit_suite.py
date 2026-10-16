@@ -1698,7 +1698,7 @@ class TestBatch5ConfigLockAndSupabaseGuards(unittest.TestCase):
                 json.dump({"monitored_users": ["streamer_added_by_api"],
                            "check_interval_seconds": 20}, f, ensure_ascii=False)
 
-            with patch.object(recorder_core, "CONFIG_FILE", tmp_cfg):
+            with patch.object(recorder_core, "CONFIG_FILE", tmp_cfg), patch("constants.CONFIG_FILE", tmp_cfg):
                 # Người dùng chỉ đổi target_user
                 recorder_core.save_config_fields({"target_user": "new_target"})
                 with open(tmp_cfg, encoding="utf-8") as f:

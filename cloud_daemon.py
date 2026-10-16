@@ -17,8 +17,9 @@ import constants
 from shared_config import load_config, save_config, save_config_fields
 from logging_utils import print_with_timestamp, print_error, print_success
 
-# BASE_DIR is imported from constants
-# CONFIG_FILE is imported from constants
+# Use constants from shared module
+BASE_DIR = constants.BASE_DIR
+CONFIG_FILE = constants.CONFIG_FILE
 
 import recorder_core
 import gdrive_manager
@@ -835,6 +836,7 @@ def streamer_recording_worker(user, initial_room_id, auto_discover=True, stop_ev
         log(f"⏹️ [@{user}] Đã đóng luồng ghi hình.")
 
 def run_daemon(max_minutes=210, interval=25, auto_discover=True):
+    global _CACHED_DRIVE_USERS
     start_time = time.time()
     max_seconds = max_minutes * 60
     # Giai đoạn DRAIN: ngưng khởi động luồng mới, chờ luồng đang ghi chốt + upload.
@@ -1028,7 +1030,7 @@ def run_daemon(max_minutes=210, interval=25, auto_discover=True):
                             ]
                             save_config(cfg)
                         with _CONFIG_USERS_LOCK:
-                            if _CACHED_DRIVE_USERS:
+                            if _CACHED_DRIVE_USERS is not None:
                                 _CACHED_DRIVE_USERS = [
                                     new_username if x == user else x
                                     for x in _CACHED_DRIVE_USERS

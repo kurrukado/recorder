@@ -63,6 +63,7 @@ jobs:
               cfg['gdrive_enabled'] = True
           if 'monitored_users' not in cfg:
               cfg['monitored_users'] = []
+          cfg['auto_upscale_1080p'] = False
           with open('config.json', 'w', encoding='utf-8') as f:
               json.dump(cfg, f, indent=4)
 

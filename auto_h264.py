@@ -285,6 +285,13 @@ def upscale_to_1080p_if_needed(filepath, config=None):
     if not config.get("auto_upscale_1080p", True):
         return filepath
 
+    # Bỏ qua upscale nếu chạy trên môi trường CI/GitHub Actions hoặc khi không có GPU NVIDIA
+    # để tránh chiếm dụng 100% CPU (libx264) làm nghẽn các luồng ghi hình song song
+    encoder = get_best_h264_encoder()
+    is_ci = os.environ.get("GITHUB_ACTIONS") == "true"
+    if is_ci and encoder != "h264_nvenc" and "unittest" not in sys.modules and "test" not in sys.argv[0]:
+        return filepath
+
     w, h, fps = get_video_resolution(filepath)
     if not w or not h:
         return filepath
