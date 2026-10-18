@@ -400,6 +400,7 @@ class RecordRequest(BaseModel):
     username: str
     duration_seconds: Optional[int] = None
 
+@app.get("/health")
 @app.get("/api/health")
 @app.get("/api/status")
 def health_check():
