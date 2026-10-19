@@ -1006,10 +1006,16 @@ def record_stream_ffmpeg(stream_url, output_filename=None, target_user: Optional
     now_str = get_now_str("%Y-%m-%d_%H-%M-%S")
     if not output_filename:
         user_dir = os.path.join(BASE_DIR, target_user_str)
-        os.makedirs(user_dir, exist_ok=True)
+        try:
+            os.makedirs(user_dir, exist_ok=True)
+        except OSError:
+            pass
         output_filename = os.path.join(user_dir, f"{target_user_str}_{now_str}.mp4")
     else:
-        os.makedirs(os.path.dirname(os.path.abspath(output_filename)), exist_ok=True)
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(output_filename)), exist_ok=True)
+        except OSError:
+            pass
 
     print(f"\n[+] Đang chuẩn bị file ghi hình: {os.path.basename(output_filename)}")
     print(f"[+] Thư mục đích: {os.path.dirname(os.path.abspath(output_filename))}")

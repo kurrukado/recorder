@@ -2087,6 +2087,7 @@ class TestStreamInterruptionAndWatchdogFixes(unittest.TestCase):
         with patch("subprocess.Popen", return_value=mock_proc) as mock_popen, \
              patch("shutil.which", return_value="/fake/ffmpeg"), \
              patch("os.path.exists", return_value=True), \
+             patch("os.makedirs"), \
              patch("os.path.getsize", return_value=1000000), \
              patch("auto_h264.ensure_h264", side_effect=lambda f: f), \
              patch("auto_h264.upscale_to_1080p_if_needed", side_effect=lambda f: f), \
@@ -2126,6 +2127,7 @@ class TestStreamInterruptionAndWatchdogFixes(unittest.TestCase):
         with patch("subprocess.Popen", return_value=mock_proc) as mock_popen, \
              patch("shutil.which", return_value="/fake/ffmpeg"), \
              patch("os.path.exists", return_value=True), \
+             patch("os.makedirs"), \
              patch("os.path.getsize", return_value=1000000), \
              patch("auto_h264.ensure_h264", side_effect=lambda f: f), \
              patch("auto_h264.upscale_to_1080p_if_needed", side_effect=lambda f: f), \
@@ -2177,6 +2179,7 @@ class TestStreamInterruptionAndWatchdogFixes(unittest.TestCase):
              patch("subprocess.Popen", return_value=mock_proc), \
              patch("shutil.which", return_value="/fake/ffmpeg"), \
              patch("os.path.exists", return_value=True), \
+             patch("os.makedirs"), \
              patch("os.path.getsize", return_value=500 * 1024), \
              patch("recorder_core.check_live_status", side_effect=fake_check_live), \
              patch("recorder_core._safe_stop_ffmpeg") as mock_safe_stop, \
@@ -2224,6 +2227,7 @@ class TestStreamInterruptionAndWatchdogFixes(unittest.TestCase):
              patch("subprocess.Popen", return_value=mock_proc), \
              patch("shutil.which", return_value="/fake/ffmpeg"), \
              patch("os.path.exists", return_value=True), \
+             patch("os.makedirs"), \
              patch("os.path.getsize", return_value=500 * 1024), \
              patch("recorder_core.check_live_status", side_effect=fake_check_live), \
              patch("recorder_core._safe_stop_ffmpeg") as mock_safe_stop, \
@@ -2295,11 +2299,14 @@ class TestStreamInterruptionAndWatchdogFixes(unittest.TestCase):
              patch("auto_h264.ensure_h264", side_effect=lambda p: p), \
              patch("auto_h264.upscale_to_1080p_if_needed", side_effect=lambda p: p), \
              patch("auto_h264.extract_middle_thumbnail", return_value=None), \
+             patch("gdrive_manager.get_access_token", return_value="fake_tok"), \
+             patch("gdrive_manager.find_or_create_folder", return_value="fake_fid"), \
              patch("gdrive_manager.set_user_recording_status_drive"), \
              patch("gdrive_manager.upload_file_to_drive", side_effect=fake_upload), \
              patch("supabase_sync.sync_recording_to_supabase"), \
              patch("supabase_sync.update_streamer_status_supabase"), \
              patch("os.path.exists", return_value=True), \
+             patch("os.makedirs"), \
              patch("os.path.getsize", return_value=1000000), \
              patch("shutil.move"), \
              patch("os.remove", side_effect=fake_remove), \
