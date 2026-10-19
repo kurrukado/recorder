@@ -10,7 +10,7 @@ import glob
 import threading
 import time
 import recorder_core
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, call
 from fastapi.testclient import TestClient
 import urllib.request
 
@@ -2034,6 +2034,283 @@ class TestBitstreamCorruptionDetection(unittest.TestCase):
 
                 det2 = recorder_core.check_live_details("initial_handle")
                 self.assertEqual(det2.get("new_username"), "redirected_handle_new")
+
+    def test_load_monitored_users_prunes_drive_when_supabase_is_source_of_truth(self):
+        """Milestone 1 Test: When supa_ok == True, Supabase is single source of truth and extra Drive streamers are pruned."""
+        import cloud_daemon
+        cloud_daemon._CACHED_DRIVE_USERS = None
+        cloud_daemon._LAST_DRIVE_CHECK = 0
+        with patch("supabase_sync.fetch_streamers_from_supabase", return_value=["user_active"]), \
+             patch("gdrive_manager.load_streamers_from_drive", return_value=["user_active", "deleted_streamer"]), \
+             patch("gdrive_manager.save_streamers_to_drive") as mock_save, \
+             patch("cloud_daemon.load_config", return_value={"monitored_users": []}):
+
+            users = cloud_daemon.load_monitored_users()
+            self.assertEqual(users, ["user_active"])
+            self.assertTrue(mock_save.called, "save_streamers_to_drive must be called to prune deleted_streamer!")
+            mock_save.assert_called_with(["user_active"])
+
+    def test_worker_skips_cloud_upload_and_db_sync_when_user_deleted(self):
+        """Milestone 1 Test: When stop_event.user_deleted == True, worker cleans up without uploading to Drive or re-upserting Supabase."""
+        import cloud_daemon
+        import threading
+
+        user = "streamer_to_remove"
+        stop_ev = threading.Event()
+        stop_ev.user_deleted = True
+        stop_ev.set()
+
+        with patch("cloud_daemon.load_monitored_users", return_value=[]), \
+             patch("recorder_core.check_live_details", return_value={"is_live": False, "room_id": None}), \
+             patch("gdrive_manager.set_user_recording_status_drive"), \
+             patch("gdrive_manager.upload_file_to_drive") as mock_drive_upload, \
+             patch("supabase_sync.sync_recording_to_supabase") as mock_supa_sync, \
+             patch("supabase_sync.update_streamer_status_supabase") as mock_status_sync, \
+             patch("shutil.rmtree"):
+
+            cloud_daemon.streamer_recording_worker(user, "room_999", stop_event=stop_ev)
+            mock_drive_upload.assert_not_called()
+            mock_supa_sync.assert_not_called()
+            mock_status_sync.assert_not_called()
+
+
+class TestStreamInterruptionAndWatchdogFixes(unittest.TestCase):
+    """Milestone 3 Unit Tests: Stream Interruption, Watchdog Tuning & Resolution Rollover (Requirement R3)"""
+
+    def test_ffmpeg_parameters_hls_stream(self):
+        """Kiểm tra cờ FFmpeg cho HLS: -rw_timeout 30000000, -reconnect_on_http_error 4xx,5xx."""
+        import recorder_core
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = 0
+        mock_proc.stdin = MagicMock()
+
+        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen, \
+             patch("shutil.which", return_value="/fake/ffmpeg"), \
+             patch("os.path.exists", return_value=True), \
+             patch("os.path.getsize", return_value=1000000), \
+             patch("auto_h264.ensure_h264", side_effect=lambda f: f), \
+             patch("auto_h264.upscale_to_1080p_if_needed", side_effect=lambda f: f), \
+             patch("auto_h264.validate_playable_video", return_value=(True, "ok", 60.0)):
+            recorder_core.record_stream_ffmpeg(
+                "https://example.com/stream/live.m3u8",
+                output_filename="/fake/test_hls.mp4",
+                duration=60,
+                auto_sync_gdrive=False
+            )
+            self.assertTrue(mock_popen.called)
+            cmd = mock_popen.call_args[0][0]
+            
+            # 1. -rw_timeout 30000000
+            rw_idx = cmd.index("-rw_timeout")
+            self.assertEqual(cmd[rw_idx + 1], "30000000")
+
+            # 2. -reconnect_on_http_error 4xx,5xx
+            http_err_idx = cmd.index("-reconnect_on_http_error")
+            self.assertEqual(cmd[http_err_idx + 1], "4xx,5xx")
+
+            # 3. Standard reconnect flags
+            self.assertIn("-reconnect", cmd)
+            self.assertIn("-reconnect_on_network_error", cmd)
+
+            # 4. HLS must NOT include -reconnect_streamed or -reconnect_at_eof
+            self.assertNotIn("-reconnect_streamed", cmd)
+            self.assertNotIn("-reconnect_at_eof", cmd)
+
+    def test_ffmpeg_parameters_flv_stream(self):
+        """Kiểm tra cờ FFmpeg cho FLV: -rw_timeout 30000000, -reconnect_streamed 1, -reconnect_on_http_error 4xx,5xx."""
+        import recorder_core
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = 0
+        mock_proc.stdin = MagicMock()
+
+        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen, \
+             patch("shutil.which", return_value="/fake/ffmpeg"), \
+             patch("os.path.exists", return_value=True), \
+             patch("os.path.getsize", return_value=1000000), \
+             patch("auto_h264.ensure_h264", side_effect=lambda f: f), \
+             patch("auto_h264.upscale_to_1080p_if_needed", side_effect=lambda f: f), \
+             patch("auto_h264.validate_playable_video", return_value=(True, "ok", 60.0)):
+            recorder_core.record_stream_ffmpeg(
+                "https://example.com/stream/live.flv",
+                output_filename="/fake/test_flv.mp4",
+                duration=60,
+                auto_sync_gdrive=False
+            )
+            self.assertTrue(mock_popen.called)
+            cmd = mock_popen.call_args[0][0]
+
+            # 1. -rw_timeout 30000000
+            rw_idx = cmd.index("-rw_timeout")
+            self.assertEqual(cmd[rw_idx + 1], "30000000")
+
+            # 2. -reconnect_on_http_error 4xx,5xx
+            http_err_idx = cmd.index("-reconnect_on_http_error")
+            self.assertEqual(cmd[http_err_idx + 1], "4xx,5xx")
+
+            # 3. FLV reconnect flags
+            self.assertIn("-reconnect", cmd)
+            self.assertIn("-reconnect_streamed", cmd)
+            self.assertIn("-reconnect_on_network_error", cmd)
+
+    def test_sub_process_watchdog_threshold_45s_and_5_consecutive_checks(self):
+        """Watchdog phải chờ stagnant >= 45s mới thăm dò live, và cần đúng 5 lần offline liên tiếp mới ngắt luồng."""
+        import recorder_core
+        mock_proc = MagicMock()
+        mock_proc.poll.side_effect = [None] * 150 + [0]
+
+        curr_time = [1000.0]
+
+        def fake_time():
+            return curr_time[0]
+
+        def fake_sleep(secs):
+            curr_time[0] += secs
+
+        poll_times = []
+
+        def fake_check_live(user):
+            poll_times.append(curr_time[0])
+            return (False, None)
+
+        with patch("time.time", side_effect=fake_time), \
+             patch("time.sleep", side_effect=fake_sleep), \
+             patch("subprocess.Popen", return_value=mock_proc), \
+             patch("shutil.which", return_value="/fake/ffmpeg"), \
+             patch("os.path.exists", return_value=True), \
+             patch("os.path.getsize", return_value=500 * 1024), \
+             patch("recorder_core.check_live_status", side_effect=fake_check_live), \
+             patch("recorder_core._safe_stop_ffmpeg") as mock_safe_stop, \
+             patch("auto_h264.ensure_h264", side_effect=lambda f: f), \
+             patch("auto_h264.upscale_to_1080p_if_needed", side_effect=lambda f: f), \
+             patch("auto_h264.validate_playable_video", return_value=(True, "ok", 60.0)):
+
+            recorder_core.record_stream_ffmpeg(
+                "https://example.com/live.flv",
+                output_filename="/fake/test_watchdog.mp4",
+                duration=3600,
+                auto_sync_gdrive=False,
+                target_user="test_target_user"
+            )
+
+            self.assertTrue(mock_safe_stop.called)
+            self.assertEqual(len(poll_times), 5)
+            self.assertGreaterEqual(poll_times[0] - 1000.0, 45.0)
+            self.assertGreaterEqual(poll_times[-1] - 1000.0, 85.0)
+            self.assertIn(call(mock_proc, timeout=8), mock_safe_stop.call_args_list)
+
+    def test_watchdog_resets_counter_if_streamer_recovers(self):
+        """Nếu check_live_status trả về True giữa chừng, bộ đếm consecutive_offline_checks được reset và luồng không bị ngắt."""
+        import recorder_core
+        mock_proc = MagicMock()
+        mock_proc.poll.side_effect = [None] * 80 + [0]
+
+        curr_time = [1000.0]
+
+        def fake_time():
+            return curr_time[0]
+
+        def fake_sleep(secs):
+            curr_time[0] += secs
+
+        check_responses = [(False, None), (False, None), (True, "room_123"), (False, None)]
+
+        def fake_check_live(user):
+            if check_responses:
+                return check_responses.pop(0)
+            return (True, "room_123")
+
+        with patch("time.time", side_effect=fake_time), \
+             patch("time.sleep", side_effect=fake_sleep), \
+             patch("subprocess.Popen", return_value=mock_proc), \
+             patch("shutil.which", return_value="/fake/ffmpeg"), \
+             patch("os.path.exists", return_value=True), \
+             patch("os.path.getsize", return_value=500 * 1024), \
+             patch("recorder_core.check_live_status", side_effect=fake_check_live), \
+             patch("recorder_core._safe_stop_ffmpeg") as mock_safe_stop, \
+             patch("auto_h264.ensure_h264", side_effect=lambda f: f), \
+             patch("auto_h264.upscale_to_1080p_if_needed", side_effect=lambda f: f), \
+             patch("auto_h264.validate_playable_video", return_value=(True, "ok", 60.0)):
+
+            recorder_core.record_stream_ffmpeg(
+                "https://example.com/live.flv",
+                output_filename="/fake/test_watchdog_reset.mp4",
+                duration=3600,
+                auto_sync_gdrive=False,
+                target_user="test_target_user"
+            )
+
+            # Watchdog cutoff uses timeout=8 when 5 consecutive offline checks occur.
+            # Since streamer recovered (True on check 3), timeout=8 must never have been called.
+            self.assertNotIn(call(mock_proc, timeout=8), mock_safe_stop.call_args_list)
+
+    def test_resolution_change_rollover_preserves_segment(self):
+        """Khi đổi độ phân giải giữa chừng (1080p -> 720p), phân đoạn mới không bị xóa bằng os.remove mà được chuyển giao sang Phần tiếp theo."""
+        import cloud_daemon
+        import threading
+
+        user = "test_res_user"
+        stop_ev = threading.Event()
+
+        seg1 = "/fake/user_p1_seg1.mp4"
+        seg2 = "/fake/user_p1_seg2.mp4"
+
+        removed_files = []
+
+        def fake_remove(path):
+            removed_files.append(path)
+
+        res_map = {
+            seg1: (1080, 1920, 30.0),
+            seg2: (720, 1280, 30.0),
+            "/fake/user_p1.mp4": (1080, 1920, 30.0),
+            "/fake/user_p2.mp4": (720, 1280, 30.0),
+        }
+
+        call_count = [0]
+        def fake_record(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return seg1
+            elif call_count[0] == 2:
+                return seg2
+            else:
+                stop_ev.set()
+                return None
+
+        uploaded_files = []
+        removed_when_p1_finalized = []
+
+        def fake_upload(f, *args, **kwargs):
+            if len(uploaded_files) == 0:
+                removed_when_p1_finalized.extend(list(removed_files))
+            uploaded_files.append(f)
+            return "drive_id_123"
+
+        with patch("cloud_daemon.load_monitored_users", return_value=[user]), \
+             patch("recorder_core.check_live_details", return_value={"is_live": True, "room_id": "r1"}), \
+             patch("cloud_daemon._fetch_stream_candidates_for_worker", return_value=["https://fake/stream.m3u8"]), \
+             patch("recorder_core.record_stream_ffmpeg", side_effect=fake_record), \
+             patch("auto_h264.validate_playable_video", return_value=(True, "ok", 60.0)), \
+             patch("auto_h264.get_video_resolution", side_effect=lambda p: res_map.get(p, (1080, 1920, 30.0))), \
+             patch("auto_h264.ensure_h264", side_effect=lambda p: p), \
+             patch("auto_h264.upscale_to_1080p_if_needed", side_effect=lambda p: p), \
+             patch("auto_h264.extract_middle_thumbnail", return_value=None), \
+             patch("gdrive_manager.set_user_recording_status_drive"), \
+             patch("gdrive_manager.upload_file_to_drive", side_effect=fake_upload), \
+             patch("supabase_sync.sync_recording_to_supabase"), \
+             patch("supabase_sync.update_streamer_status_supabase"), \
+             patch("os.path.exists", return_value=True), \
+             patch("os.path.getsize", return_value=1000000), \
+             patch("shutil.move"), \
+             patch("os.remove", side_effect=fake_remove), \
+             patch("time.sleep"):
+
+            cloud_daemon.streamer_recording_worker(user, "r1", stop_event=stop_ev)
+
+            # 1. seg2 was NOT removed when Part 1 was finalized and uploaded
+            self.assertNotIn(seg2, removed_when_p1_finalized, "Segment 2 bị xóa nhầm bởi os.remove thay vì rollover sang Part 2!")
+            # 2. Both Part 1 and Part 2 were uploaded (seg2 rolled over and published in Part 2)
+            self.assertEqual(len(uploaded_files), 2, "Part 2 phải được khởi tạo và upload chứa segment đã rollover!")
 
 
 if __name__ == "__main__":

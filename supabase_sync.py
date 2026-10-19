@@ -51,8 +51,10 @@ def get_supabase_headers(content_type: str = "application/json"):
         "Content-Type": content_type
     }
 
-def fetch_streamers_from_supabase() -> list:
-    """Đọc danh sách streamer đang theo dõi trực tiếp từ table 'tiktok_streamers'."""
+def fetch_streamers_from_supabase() -> Optional[list]:
+    """Đọc danh sách streamer đang theo dõi trực tiếp từ table 'tiktok_streamers'. Trả về list nếu thành công, None nếu lỗi/offline."""
+    if not SUPABASE_KEY:
+        return None
     try:
         headers = get_supabase_headers()
         url = f"{SUPABASE_URL}/rest/v1/tiktok_streamers?select=username&order=id.asc"
@@ -63,10 +65,12 @@ def fetch_streamers_from_supabase() -> list:
                     return [d["username"].strip().replace("@", "").lower() for d in data if "username" in d and d["username"]]
     except Exception as e:
         print(f"[SUPABASE-SYNC] [!] Lỗi nạp streamers từ Supabase: {e}")
-    return []
+    return None
 
-def fetch_streamers_details_from_supabase() -> list:
-    """Đọc toàn bộ thông tin và trạng thái live/record của các streamer từ table 'tiktok_streamers'."""
+def fetch_streamers_details_from_supabase() -> Optional[list]:
+    """Đọc toàn bộ thông tin và trạng thái live/record của các streamer từ table 'tiktok_streamers'. Trả về list nếu thành công, None nếu lỗi/offline."""
+    if not SUPABASE_KEY:
+        return None
     try:
         headers = get_supabase_headers()
         url = f"{SUPABASE_URL}/rest/v1/tiktok_streamers?select=*&order=id.asc"
@@ -93,7 +97,7 @@ def fetch_streamers_details_from_supabase() -> list:
                     return result
     except Exception as e:
         print(f"[SUPABASE-SYNC] [!] Lỗi nạp streamers chi tiết từ Supabase: {e}")
-    return []
+    return None
 
 def rename_streamer_supabase(old_user: str, new_user: str) -> bool:
     """

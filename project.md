@@ -2,7 +2,8 @@
 
 > **Ghi hình TikTok 24/7 trên cloud miễn phí**: GitHub Actions ghi hình (tối đa 10 streamer song song),
 > Google Drive 5TB lưu trữ, Supabase giữ metadata cho web, Render/Vercel phục vụ API + giao diện.
-> Hệ thống chạy độc lập với máy cá nhân.
+> **Yêu cầu cốt lõi: hệ thống chạy không cần máy tính local.** Mọi khâu vận hành (ghi hình, lưu trữ,
+> API, web) đều nằm trên cloud; máy cá nhân chỉ là **tuỳ chọn** khi phát triển / ghi cục bộ.
 
 ---
 
@@ -36,6 +37,18 @@ auto_h264 (chuẩn hóa) → Drive + Supabase (lưu) → web-truyen (hiển th�
 **Đặc điểm chính:** cloud-first 24/7 · không re-encode video (`-c copy`) · tự lành lỗi 6 lần/ngày ·
 phát video 0 bandwidth qua CDN · 10 streamer song song · tự tách part khi đổi độ phân giải.
 
+**Phân bổ hạ tầng — không khâu nào bắt buộc máy local:**
+
+| Thành phần | Chạy trên (cloud) | Cần máy local? |
+| :--- | :--- | :--- |
+| Ghi hình 24/7 | GitHub Actions (`recorder.yml`) | Không |
+| Sửa video lỗi | GitHub Actions (`repair-watchdog.yml`) | Không |
+| Lưu trữ video | Google Drive (5TB) | Không |
+| Metadata / heartbeat | Supabase | Không |
+| REST API | Render Free (`tiktok-recorder-api`) | Không |
+| Web UI | Vercel | Không |
+| Chạy thử / ghi cục bộ (`run_*.bat`, CLI, API `:8000`) | Windows + FFmpeg | **Tuỳ chọn (chỉ khi phát triển)** |
+
 ---
 
 ## 2. Cấu trúc dự án
@@ -59,7 +72,7 @@ D:\tiktok-recorder\
 ├── tiktok_recorder.py            # CLI menu
 ├── config.json (gitignored) / config.example.json
 ├── requirements.txt
-├── run_cloud_daemon.bat / run_recorder.bat
+├── run_cloud_daemon.bat / run_recorder.bat   # tuỳ chọn: chạy local khi phát triển
 ├── test_audit_suite.py           # Bộ test hồi quy (CI chạy bộ này)
 ├── README.md / HD_SU_DUNG.md
 └── project.md                    # Tài liệu này
@@ -158,7 +171,7 @@ FFmpeg tìm theo thứ tự: `ffmpeg.exe` cạnh source → `shutil.which("ffmpe
 * `load_streamers_from_drive()` / `save_streamers_to_drive()` / `load_active_recordings_from_drive()` +
   `set_users_recording_status_drive()` (heartbeat, có điều tiết trùng lặp — xem 9.3) /
   `set_user_recording_status_drive()` / `delete_file_drive()` / `clean_corrupt_files_from_drive()`.
-* `gdrive_auth.py` — OAuth2 flow `localhost:8080` nhận code, chờ 300s.
+* `gdrive_auth.py` — OAuth2 flow `localhost:8080` nhận code, chờ 300s (**chạy 1 lần** để lấy refresh token, sau đó token nằm trong GitHub Secrets — không cần máy local khi vận hành).
 
 ### 4.5 `supabase_sync.py` — đồng bộ dữ liệu cho web
 * `_secret_from_config()` — đọc env trước, fallback `config.json` (**không hardcode key trong source**).
@@ -365,7 +378,10 @@ dự án, và tránh lỗi thiếu khai báo khi khởi chạy trên runner sạ
 
 ---
 
-## 10. Kiểm thử & vận hành cục bộ
+## 10. Kiểm thử & vận hành cục bộ (tuỳ chọn — chỉ khi phát triển)
+
+> Chạy production **không cần** phần này: ghi hình do GitHub Actions, API do Render, web do Vercel đảm
+> nhiệm. Các lệnh dưới đây chỉ dùng để test/sửa mã trên máy cá nhân.
 
 ```bash
 pip install -r requirements.txt
@@ -375,7 +391,7 @@ run_recorder.bat                            # CLI menu
 python api_server.py                        # REST API :8000
 python tiktok_recorder.py --user <name> --now
 python repair_cloud_videos_engine.py --today
-python gdrive_auth.py                        # cấp refresh token OAuth
+python gdrive_auth.py                        # cấp refresh token OAuth (1 lần)
 ```
 
 Bộ test dùng `unittest` + `mock` thuần — **mọi lời gọi mạng (TikTok, Google Drive, Supabase) đều bị
@@ -389,10 +405,14 @@ rỗng) — xoá trước khi commit.
 `D:\web-truyen` **đã nhúng một bản sao công cụ này** tại `D:\web-truyen\kuruRecord\` và có workflow
 `.github/workflows/recorder.yml` chạy với `defaults.run.working-directory: ./kuruRecord`.
 
+> **Không cần local**: API recorder chuẩn là bản cloud `https://tiktok-api-i0o8.onrender.com` (Render
+> Free). Cloudflare Tunnel → `localhost:8000` chỉ là **đường tăng tốc tuỳ chọn** khi máy dev đang chạy
+> `api_server.py`; web vẫn hoạt động đầy đủ nếu không có local.
+
 ```text
 Browser /record ──PIN──► Next.js /api/record/[...path] ──► TIKTOK_RECORDER_API_URL
-                        (RECORD_PIN, timeout 25s,         ▲ fallback
-                         chặn video bytes)                 https://tiktok-api-i0o8.onrender.com
+                        (RECORD_PIN, timeout 25s,           ▲ fallback cloud
+                         chặn video bytes)                   https://tiktok-api-i0o8.onrender.com
 /api/record/dispatch ──GITHUB_PAT──► GitHub Actions recorder.yml ──► kuruRecord/cloud_daemon.py
 /api/record/sync ──PIN|CRON_SECRET──► scripts/auto-sync-recordings.mjs ──► Supabase + covers/
 app/record/page.js ─────────────────► Supabase (tiktok_*) + /api/record/* + Drive CDN
@@ -402,13 +422,14 @@ app/record/page.js ─────────────────► Supaba
 * `app/record/page.js` — dashboard: PIN gate, CRUD streamer, trạng thái live, lưới video, modal phát
   (HTML5 + iframe Drive), cache localStorage → Supabase → API.
 * `app/api/record/[...path]/route.js` — proxy mọi endpoint của tool; tự chọn `TIKTOK_RECORDER_API_URL`
-  (Cloudflare Tunnel → localhost → fallback Render); xử lý đặc biệt `stream-video-id/<id>` (proxy Range
-  206) và `download-drive/<id>`; **chặn kéo `video/*` qua server** để giữ 0-byte bandwidth.
+  (Render cloud; có thể ưu tiên Cloudflare Tunnel → localhost nếu muốn tăng tốc lúc dev); xử lý đặc biệt
+  `stream-video-id/<id>` (proxy Range 206) và `download-drive/<id>`; **chặn kéo `video/*` qua server** để
+  giữ 0-byte bandwidth.
 * `app/api/record/dispatch/route.js` — kích hoạt `recorder.yml` trên GitHub Actions.
 * `app/api/record/sync/route.js` + `scripts/auto-sync-recordings.mjs` — poll `/api/recordings` (30s),
   tải thumbnail, upsert `covers/record-thumbnails/...` và `tiktok_recordings`.
 * `lib/record-queue.js` — tuần tự hoá mọi call API recorder; `lib/supabase.js` — client Supabase.
-* `start-all-services.mjs` / `start.bat` — khởi động `api_server.py:8000` + sync + cloudflared.
+* `start-all-services.mjs` / `start.bat` — **tuỳ chọn**: chạy local `api_server.py:8000` + sync + cloudflared.
 
 **Env web-truyen cần có**: `TIKTOK_RECORDER_API_URL`, `RECORD_PIN` (mặc định code `'2026'`),
 `GITHUB_PAT`/`WORKFLOW_PAT`, `TIKTOK_RECORDER_REPO_OWNER`/`_REPO_NAME`,

@@ -1022,7 +1022,7 @@ def record_stream_ffmpeg(stream_url, output_filename=None, target_user: Optional
         FFMPEG_PATH,
         "-y",
         "-stdin",
-        "-rw_timeout", "15000000",
+        "-rw_timeout", "30000000",
     ]
     if is_hls:
         # Luồng HLS/m3u8: Tuyệt đối KHÔNG dùng -reconnect_at_eof 1 hoặc -reconnect_streamed 1
@@ -1031,6 +1031,7 @@ def record_stream_ffmpeg(stream_url, output_filename=None, target_user: Optional
         cmd.extend([
             "-reconnect", "1",
             "-reconnect_on_network_error", "1",
+            "-reconnect_on_http_error", "4xx,5xx",
             "-reconnect_delay_max", "10",
         ])
     else:
@@ -1039,6 +1040,7 @@ def record_stream_ffmpeg(stream_url, output_filename=None, target_user: Optional
             "-reconnect", "1",
             "-reconnect_streamed", "1",
             "-reconnect_on_network_error", "1",
+            "-reconnect_on_http_error", "4xx,5xx",
             "-reconnect_delay_max", "10",
         ])
 
@@ -1131,7 +1133,7 @@ def record_stream_ffmpeg(stream_url, output_filename=None, target_user: Optional
                 break
 
             # Kiểm tra trạng thái streamer khi dữ liệu chững lại (chỉ với luồng thường, không phải VIP Sub-Only)
-            if not is_sub_only and size_bytes >= 250 * 1024 and stagnant_seconds >= 20:
+            if not is_sub_only and size_bytes >= 250 * 1024 and stagnant_seconds >= 45:
                 if (now - last_live_check_time) >= 10:
                     last_live_check_time = now
                     if target_user:
@@ -1139,8 +1141,8 @@ def record_stream_ffmpeg(stream_url, output_filename=None, target_user: Optional
                             is_still_live, _ = check_live_status(target_user)
                             if not is_still_live:
                                 consecutive_offline_checks += 1
-                                if consecutive_offline_checks >= 3:
-                                    print(f"\n\n[✓] [@{target_user}] Streamer ĐÃ XUỐNG LIVE (Xác nhận 3 lần liên tiếp không còn tín hiệu sau {stagnant_seconds}s).")
+                                if consecutive_offline_checks >= 5:
+                                    print(f"\n\n[✓] [@{target_user}] Streamer ĐÃ XUỐNG LIVE (Xác nhận 5 lần liên tiếp không còn tín hiệu sau {stagnant_seconds}s).")
                                     print(f"[*] [@{target_user}] Đang chốt file video MP4 và lưu trữ...")
                                     _safe_stop_ffmpeg(proc, timeout=8)
                                     break
@@ -1149,8 +1151,8 @@ def record_stream_ffmpeg(stream_url, output_filename=None, target_user: Optional
                         except Exception:
                             pass
 
-            # Nếu dữ liệu ngắt quãng: tối đa 30s nếu file chưa đủ 250 KB, tối đa 90s nếu đang ghi dở
-            max_stagnant = 30 if size_bytes < 250 * 1024 else 90
+            # Nếu dữ liệu ngắt quãng: tối đa 30s nếu file chưa đủ 250 KB, tối đa 95s nếu đang ghi dở
+            max_stagnant = 30 if size_bytes < 250 * 1024 else 95
             if stagnant_seconds >= max_stagnant:
                 offline_confirmed = False
                 if target_user and (now - last_live_check_time) >= 10:
@@ -1159,7 +1161,7 @@ def record_stream_ffmpeg(stream_url, output_filename=None, target_user: Optional
                         st_check, _ = check_live_status(target_user)
                         if not st_check:
                             consecutive_offline_checks += 1
-                            if consecutive_offline_checks >= 2:
+                            if consecutive_offline_checks >= 5:
                                 offline_confirmed = True
                         else:
                             consecutive_offline_checks = 0

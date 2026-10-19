@@ -478,29 +478,30 @@ def get_active_recordings():
 @app.get("/api/users")
 def get_users(check_live: bool = True, fresh: bool = False):
     try:
-        users_list = []
-
         # 1. Nguồn dữ liệu số 1: Supabase Database (đồng bộ tức thì từ Web)
         supa_users = []
         supa_streamers_map = {}
+        supa_ok = False
         try:
-            supa_users = supabase_sync.fetch_streamers_from_supabase()
-            if supa_users:
-                users_list.extend(supa_users)
+            s_list = supabase_sync.fetch_streamers_from_supabase()
+            if s_list is not None and isinstance(s_list, list):
+                supa_ok = True
+                supa_users = [u.strip().replace("@", "").lower() for u in s_list if u.strip()]
         except Exception as e:
             print(f"[!] Lỗi nạp streamers từ Supabase: {e}")
 
         try:
             supa_details = supabase_sync.fetch_streamers_details_from_supabase()
-            if supa_details:
+            if supa_details is not None and isinstance(supa_details, list):
+                supa_ok = True
                 for sd in supa_details:
-                    u = sd.get("username")
+                    u = sd.get("username", "").strip().replace("@", "").lower() if isinstance(sd, dict) else ""
                     if u:
                         supa_streamers_map[u] = sd
-                        if u not in users_list:
-                            users_list.append(u)
-        except Exception:
-            pass
+                        if u not in supa_users:
+                            supa_users.append(u)
+        except Exception as e:
+            print(f"[!] Lỗi nạp streamers chi tiết từ Supabase: {e}")
 
         # 2. Nguồn dữ liệu số 2: Google Drive
         drive_users = []
@@ -509,40 +510,37 @@ def get_users(check_live: bool = True, fresh: bool = False):
             d_users = gdrive_manager.load_streamers_from_drive()
             if d_users is not None and isinstance(d_users, list):
                 drive_users = [u.strip().replace("@", "").lower() for u in d_users if u.strip()]
-                users_list.extend(drive_users)
         except Exception as e:
             print(f"[!] Lỗi nạp streamers từ Drive: {e}")
 
-        # 3. Nguồn dữ liệu số 3: config.json local (chỉ dự phòng khởi động khi cả Supabase và Drive đều rỗng/offline)
-        if not users_list:
-            cfg = load_config()
-            cfg_users = cfg.get("monitored_users", [])
-            if cfg_users:
-                users_list.extend(cfg_users)
-
-        # Khử trùng lặp và giữ thứ tự chuẩn
-        users = list(dict.fromkeys([u.strip().replace("@", "").lower() for u in users_list if u.strip()]))
-
-        # Tự động đồng bộ lên Drive nếu Supabase có streamer mới (chạy nền để không block GET API)
-        if d_users is not None and supa_users and (set(supa_users) - set(drive_users)):
-            def _bg_drive_folder_sync(all_u, new_u):
-                try:
-                    gdrive_manager.save_streamers_to_drive(all_u)
-                    for nu in new_u:
-                        gdrive_manager.create_streamer_folder_drive(nu)
-                except Exception:
-                    pass
-            threading.Thread(target=_bg_drive_folder_sync, args=(users, set(supa_users) - set(drive_users)), daemon=True).start()
-
-        # Tự động đồng bộ lên Supabase nếu Drive có streamer mới (chạy nền để không block GET API)
-        if d_users is not None and (set(drive_users) - set(supa_users)):
-            def _bg_supa_sync(missing_u):
-                for mu in missing_u:
+        # Xác định danh sách streamer theo thứ tự ưu tiên nguồn
+        if supa_ok:
+            # Milestone 1: Khi supa_ok == True, Supabase là single source of truth.
+            # Tuyệt đối không cộng gộp drive_users để ngăn chặn streamer đã xóa bị hồi sinh.
+            users = supa_users
+            # Nếu Drive streamers.json bị lệch so với Supabase (hoặc có streamer mới/bị xóa),
+            # đồng bộ và prune Drive streamers.json trong background thread
+            if d_users is not None and (set(drive_users) != set(users)):
+                def _bg_drive_folder_sync(target_u, new_u):
                     try:
-                        supabase_sync.add_streamer_to_supabase(mu)
+                        gdrive_manager.save_streamers_to_drive(target_u)
+                        for nu in new_u:
+                            gdrive_manager.create_streamer_folder_drive(nu)
                     except Exception:
                         pass
-            threading.Thread(target=_bg_supa_sync, args=(set(drive_users) - set(supa_users),), daemon=True).start()
+                new_for_drive = set(users) - set(drive_users)
+                threading.Thread(target=_bg_drive_folder_sync, args=(users, new_for_drive), daemon=True).start()
+        elif d_users is not None:
+            # Nguồn dự phòng số 2: Google Drive khi Supabase offline
+            users = drive_users
+        else:
+            # Nguồn dự phòng số 3: config.json local khi cả Supabase và Drive đều offline
+            cfg = load_config()
+            cfg_users = cfg.get("monitored_users", [])
+            users = [u.strip().replace("@", "").lower() for u in cfg_users if u.strip()]
+
+        # Khử trùng lặp và giữ thứ tự chuẩn
+        users = list(dict.fromkeys([u.strip().replace("@", "").lower() for u in users if u.strip()]))
 
         active_users = set()
         try:
@@ -904,10 +902,11 @@ def delete_user(username: str, delete_files: bool = True, bg_tasks: BackgroundTa
     with config_transaction():
         cfg = load_config()
         cfg_users = cfg.get("monitored_users", [])
-        if user in cfg_users:
-            cfg["monitored_users"] = [u for u in cfg_users if u != user]
+        clean_cfg = [u for u in cfg_users if u.strip().lstrip("@").lower() != user]
+        if len(clean_cfg) != len(cfg_users):
+            cfg["monitored_users"] = clean_cfg
             save_config(cfg)
-        users = cfg.get("monitored_users", [])
+        users = clean_cfg
 
     # 2. Ngắt luồng quay cục bộ ngay lập tức nếu đang quay
     with RECORDING_LOCK:
@@ -927,6 +926,7 @@ def delete_user(username: str, delete_files: bool = True, bg_tasks: BackgroundTa
     # 4. Invalidate RAM caches ngay lập tức
     with LIVE_CACHE_LOCK:
         LIVE_CACHE.pop(user, None)
+        LIVE_CACHE.pop(f"@{user}", None)
     with _RECORDINGS_CACHE_LOCK:
         _RECORDINGS_CACHE["timestamp"] = 0
         _RECORDINGS_CACHE["data"] = [v for v in _RECORDINGS_CACHE.get("data", []) if (v.get("user") != user and v.get("username") != user)]
@@ -1199,6 +1199,9 @@ def bg_record_worker(user: str, duration: Optional[int] = None, stop_event: Opti
     consecutive_offline_checks = 0
     worker_started_at = time.time()
     last_heartbeat_at = 0.0
+    rollover_segment = None
+    rollover_dur = 0.0
+    rollover_res = None
 
     my_task_entry = None
     rec_lock_cm = None
@@ -1247,13 +1250,14 @@ def bg_record_worker(user: str, duration: Optional[int] = None, stop_event: Opti
             is_sub_only = live_details.get("is_sub_only", False)
 
             if not is_live or not room_id:
-                consecutive_offline_checks += 1
-                if consecutive_offline_checks >= 3:
-                    print(f"[🏁] [@{user}] Xác nhận {consecutive_offline_checks} lần liên tiếp streamer không live. Dừng ghi hình.")
-                    break
-                print(f"[⏳] [@{user}] Chưa thấy live (lần {consecutive_offline_checks}/3) — có thể lỗi mạng tạm thời. Chờ 10s rồi kiểm tra lại...")
-                time.sleep(10)
-                continue
+                if not (rollover_segment and os.path.exists(rollover_segment)):
+                    consecutive_offline_checks += 1
+                    if consecutive_offline_checks >= 3:
+                        print(f"[🏁] [@{user}] Xác nhận {consecutive_offline_checks} lần liên tiếp streamer không live. Dừng ghi hình.")
+                        break
+                    print(f"[⏳] [@{user}] Chưa thấy live (lần {consecutive_offline_checks}/3) — có thể lỗi mạng tạm thời. Chờ 10s rồi kiểm tra lại...")
+                    time.sleep(10)
+                    continue
             consecutive_offline_checks = 0
 
             now_str = recorder_core.get_now_str("%Y-%m-%d_%H-%M-%S")
@@ -1262,10 +1266,22 @@ def bg_record_worker(user: str, duration: Optional[int] = None, stop_event: Opti
             os.makedirs(user_dir, exist_ok=True)
             output_file = os.path.join(user_dir, f"{user}_{now_str}{part_suffix}.mp4")
 
-            part_segments = []
-            accumulated_seconds = 0.0
+            if rollover_segment and os.path.exists(rollover_segment):
+                part_segments = [rollover_segment]
+                accumulated_seconds = rollover_dur
+                part_ref_resolution = rollover_res
+                print(f"[🔄] [@{user}] Tiếp nhận phân đoạn chuyển tiếp ({rollover_res[0]}x{rollover_res[1]}, {rollover_dur:.1f}s) vào Phần {part_number}!")
+                rollover_segment = None
+                rollover_dur = 0.0
+                rollover_res = None
+            else:
+                part_segments = []
+                accumulated_seconds = 0.0
+                part_ref_resolution = None
+                rollover_segment = None
+                rollover_dur = 0.0
+                rollover_res = None
             offline_confirmed = False
-            part_ref_resolution = None  # Khởi tạo độ phân giải tham chiếu cho part hiện tại
             print(f"[🔴] [@{user}] Bắt đầu tích lũy Phần {part_number} (Tối đa 1 tiếng: {MAX_CHUNK_SECONDS}s)...")
 
             while accumulated_seconds < (300 if is_sub_only else MAX_CHUNK_SECONDS):
@@ -1361,13 +1377,11 @@ def bg_record_worker(user: str, duration: Optional[int] = None, stop_event: Opti
                                 part_ref_resolution = (seg_w, seg_h)
                             elif part_ref_resolution and (seg_w, seg_h) != part_ref_resolution:
                                 print(f"[⚠️] [@{user}] Phát hiện ĐỔI ĐỘ PHÂN GIẢI giữa chừng: {part_ref_resolution[0]}x{part_ref_resolution[1]} → {seg_w}x{seg_h}. "
-                                      f"Tự động tách Phần {part_number} tại đây để tránh lỗi khung hình xám/nhiễu macroblock.")
-                                # Chốt part hiện tại TRƯỚC segment mới (không thêm segment mới vào)
-                                # Segment mới sẽ được thu lại ở part tiếp theo
-                                try:
-                                    os.remove(rec_res)
-                                except Exception:
-                                    pass
+                                      f"Tự động tách Phần {part_number} tại đây và chuyển phân đoạn mới ({seg_w}x{seg_h}, {dur:.1f}s) sang Phần {part_number + 1}...")
+                                # Bảo toàn phân đoạn mới để chuyển giao (rollover) sang Part tiếp theo, KHÔNG xóa bỏ
+                                rollover_segment = rec_res
+                                rollover_dur = dur
+                                rollover_res = (seg_w, seg_h)
                                 break
                     except Exception:
                         pass
@@ -1466,6 +1480,11 @@ def bg_record_worker(user: str, duration: Optional[int] = None, stop_event: Opti
                                 os.remove(seg)
                             except Exception:
                                 pass
+                    if rollover_segment and os.path.exists(rollover_segment):
+                        try:
+                            os.remove(rollover_segment)
+                        except Exception:
+                            pass
                     break
                 print(f"[⏹️] [@{user}] Nhận yêu cầu dừng. Chốt {len(part_segments)} phân đoạn hiện có để lưu trữ an toàn...")
 
@@ -1620,6 +1639,10 @@ def bg_record_worker(user: str, duration: Optional[int] = None, stop_event: Opti
             if stop_event and stop_event.is_set():
                 break
 
+            if rollover_segment and os.path.exists(rollover_segment):
+                print(f"[⏩] [@{user}] Có phân đoạn chuyển tiếp sang Phần {part_number} ({rollover_res[0]}x{rollover_res[1]}). Bắt đầu Phần {part_number} ngay...")
+                continue
+
 
             # Kiểm tra streamer còn live không để tiếp tục phân đoạn tiếp theo
             time.sleep(3)
@@ -1668,6 +1691,11 @@ def bg_record_worker(user: str, duration: Optional[int] = None, stop_event: Opti
     except Exception as e:
         print(f"[!] Lỗi ghi hình worker: {e}")
     finally:
+        if rollover_segment and os.path.exists(rollover_segment) and getattr(stop_event, "user_deleted", False):
+            try:
+                os.remove(rollover_segment)
+            except Exception:
+                pass
         still_our_registration = False
         with RECORDING_LOCK:
             cur = ACTIVE_RECORDING_TASKS.get(user)
