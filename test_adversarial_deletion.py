@@ -141,18 +141,14 @@ class TestAdversarialDeletion(unittest.TestCase):
             self.assertEqual(saved_users, ["valid_streamer"])
 
     def test_supabase_thumbnail_cleanup_pagination(self):
-        """Test that delete_streamer_data_supabase paginates until all thumbnails are deleted."""
+        """Test that delete_streamer_data_supabase paginates until all thumbnails are deleted using two-phase cleanup."""
         import supabase_sync
 
-        mock_pages = [
-            # Page 1: 100 items
-            [{"name": f"thumb_{i}.jpg"} for i in range(100)],
-            # Page 2: 50 items
-            [{"name": f"thumb_100_{i}.jpg"} for i in range(50)],
-            # Page 3: 0 items (end)
-            [],
-        ]
-        page_iter = iter(mock_pages)
+        total_items = 150
+        all_objects = [{"name": f"thumb_{i:04d}.jpg"} for i in range(total_items)]
+        list_calls = []
+        delete_calls = []
+        deleted_prefixes = []
 
         class MockResponse:
             def __init__(self, status_code, json_data):
@@ -169,19 +165,22 @@ class TestAdversarialDeletion(unittest.TestCase):
             def __exit__(self, *args):
                 pass
 
-        delete_calls = []
-
         def mock_post(url, *args, **kwargs):
             if "object/list" in url:
-                try:
-                    data = next(page_iter)
-                    return MockResponse(200, data)
-                except StopIteration:
-                    return MockResponse(200, [])
+                payload = kwargs.get("json", {})
+                offset = payload.get("offset", 0)
+                limit = payload.get("limit", 100)
+                list_calls.append({"offset": offset, "limit": limit})
+                # Phase 1: Slice from stored objects by offset
+                slice_data = all_objects[offset:offset + limit]
+                return MockResponse(200, slice_data)
             return MockResponse(200, {})
 
         def mock_delete(url, *args, **kwargs):
             delete_calls.append((url, kwargs.get("json", {})))
+            if "storage/v1/object" in url:
+                prefixes = kwargs.get("json", {}).get("prefixes", [])
+                deleted_prefixes.extend(prefixes)
             return MockResponse(200, {})
 
         with patch("requests.post", side_effect=mock_post), \
@@ -189,11 +188,18 @@ class TestAdversarialDeletion(unittest.TestCase):
 
             ok = supabase_sync.delete_streamer_data_supabase("test_user_pagination")
             self.assertTrue(ok)
-            # Should have called delete for page 1 and page 2
+
+            # Verify Phase 1: Read-only listing paginated with offset
+            self.assertGreaterEqual(len(list_calls), 2)
+            self.assertEqual(list_calls[0]["offset"], 0)
+            self.assertEqual(list_calls[1]["offset"], 100)
+
+            # Verify Phase 2: Batch delete in chunks of 100
             storage_deletes = [c for c in delete_calls if "object/" in c[0]]
             self.assertEqual(len(storage_deletes), 2)
             self.assertEqual(len(storage_deletes[0][1]["prefixes"]), 100)
             self.assertEqual(len(storage_deletes[1][1]["prefixes"]), 50)
+            self.assertEqual(len(deleted_prefixes), total_items)
 
 
 if __name__ == "__main__":

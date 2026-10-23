@@ -57,7 +57,7 @@ def fetch_streamers_from_supabase() -> Optional[list]:
         return None
     try:
         headers = get_supabase_headers()
-        url = f"{SUPABASE_URL}/rest/v1/tiktok_streamers?select=username&order=id.asc"
+        url = f"{SUPABASE_URL}/rest/v1/tiktok_streamers?select=username&order=id.desc"
         with requests.get(url, headers=headers, timeout=10) as res:
             if res.status_code == 200:
                 data = res.json()
@@ -73,7 +73,7 @@ def fetch_streamers_details_from_supabase() -> Optional[list]:
         return None
     try:
         headers = get_supabase_headers()
-        url = f"{SUPABASE_URL}/rest/v1/tiktok_streamers?select=*&order=id.asc"
+        url = f"{SUPABASE_URL}/rest/v1/tiktok_streamers?select=*&order=id.desc"
         with requests.get(url, headers=headers, timeout=10) as res:
             if res.status_code == 200:
                 data = res.json()
@@ -82,15 +82,19 @@ def fetch_streamers_details_from_supabase() -> Optional[list]:
                     for d in data:
                         u = d.get("username", "").strip().replace("@", "").lower()
                         if u:
+                            is_rec = bool(d.get("is_recording") or d.get("status") == "recording")
+                            is_liv = bool(d.get("is_live") or d.get("status") in ("live", "recording") or is_rec)
                             result.append({
+                                "id": d.get("id"),
                                 "username": u,
-                                "is_live": bool(d.get("is_live")),
-                                "is_recording": bool(d.get("is_recording")),
+                                "is_live": is_liv,
+                                "is_recording": is_rec,
                                 "room_id": d.get("room_id") or None,
                                 "nickname": d.get("nickname") or None,
                                 "avatar_thumb": d.get("avatar_thumb") or None,
-                                "status": d.get("status") or ("recording" if d.get("is_recording") else ("live" if d.get("is_live") else "offline")),
+                                "status": d.get("status") or ("recording" if is_rec else ("live" if is_liv else "offline")),
                                 "is_account_deleted": bool(d.get("is_account_deleted") or d.get("status") == "deleted"),
+                                "created_at": d.get("created_at") or None,
                                 "last_live_at": d.get("last_live_at") or None,
                                 "updated_at": d.get("updated_at") or None,
                             })
@@ -191,7 +195,7 @@ def get_active_recordings_from_supabase(as_details: bool = False) -> list:
     """Lấy danh sách các username (hoặc dict chi tiết gồm username và updated_at) hiện đang được ghi hình từ Supabase DB."""
     try:
         headers = get_supabase_headers()
-        url = f"{SUPABASE_URL}/rest/v1/tiktok_streamers?is_recording=eq.true&select=username,updated_at"
+        url = f"{SUPABASE_URL}/rest/v1/tiktok_streamers?or=(is_recording.eq.true,status.eq.recording)&select=username,updated_at"
         with requests.get(url, headers=headers, timeout=8) as res:
             if res.status_code == 200:
                 data = res.json()
@@ -462,77 +466,134 @@ def delete_streamer_data_supabase(user: str) -> bool:
     Xóa toàn bộ bản ghi video của streamer trong table 'tiktok_recordings',
     xóa streamer trong table 'tiktok_streamers', và dọn dẹp ảnh thumbnail trong Supabase Storage.
     """
+    if not SUPABASE_KEY:
+        return True
     try:
         user = user.strip().replace("@", "").lower()
-        headers = get_supabase_headers()
+        headers = get_supabase_headers("application/json")
 
-        # 1. Xóa toàn bộ video của user trong table tiktok_recordings
-        rec_url = f"{SUPABASE_URL}/rest/v1/tiktok_recordings?username=eq.{user}"
-        with requests.delete(rec_url, headers=headers, timeout=10) as res_rec:
-            ok_rec = res_rec.status_code in (200, 204)
-            if ok_rec:
-                print(f"[SUPABASE-SYNC] [✓] Đã xóa toàn bộ video của @{user} trong tiktok_recordings")
-            else:
-                print(f"[SUPABASE-SYNC] [!] Lỗi xóa tiktok_recordings ({res_rec.status_code}): {res_rec.text}")
+        # 1. Xóa toàn bộ video của user trong table tiktok_recordings (cả user và @user)
+        rec_url = f"{SUPABASE_URL}/rest/v1/tiktok_recordings?username=in.({user},@{user})"
+        ok_rec = False
+        try:
+            with requests.delete(rec_url, headers=headers, timeout=10) as res_rec:
+                ok_rec = res_rec.status_code in (200, 204)
+                if ok_rec:
+                    print(f"[SUPABASE-SYNC] [✓] Đã xóa toàn bộ video của @{user} trong tiktok_recordings")
+                else:
+                    print(f"[SUPABASE-SYNC] [!] Lỗi xóa tiktok_recordings ({res_rec.status_code}): {res_rec.text}")
+        except Exception as rec_err:
+            print(f"[SUPABASE-SYNC] [!] Ngoại lệ khi xóa tiktok_recordings: {rec_err}")
 
-        # 2. Xóa streamer trong table tiktok_streamers
-        usr_url = f"{SUPABASE_URL}/rest/v1/tiktok_streamers?username=eq.{user}"
-        with requests.delete(usr_url, headers=headers, timeout=10) as res_usr:
-            ok_usr = res_usr.status_code in (200, 204)
-            if ok_usr:
-                print(f"[SUPABASE-SYNC] [✓] Đã xóa streamer @{user} trong tiktok_streamers")
-            else:
-                print(f"[SUPABASE-SYNC] [!] Lỗi xóa tiktok_streamers ({res_usr.status_code}): {res_usr.text}")
+        # 2. Xóa streamer trong table tiktok_streamers (cả user và @user)
+        usr_url = f"{SUPABASE_URL}/rest/v1/tiktok_streamers?username=in.({user},@{user})"
+        ok_usr = False
+        try:
+            with requests.delete(usr_url, headers=headers, timeout=10) as res_usr:
+                ok_usr = res_usr.status_code in (200, 204)
+                if ok_usr:
+                    print(f"[SUPABASE-SYNC] [✓] Đã xóa streamer @{user} trong tiktok_streamers")
+                else:
+                    print(f"[SUPABASE-SYNC] [!] Lỗi xóa tiktok_streamers ({res_usr.status_code}): {res_usr.text}")
+        except Exception as usr_err:
+            print(f"[SUPABASE-SYNC] [!] Ngoại lệ khi xóa tiktok_streamers: {usr_err}")
 
         # 3. Dọn dẹp ảnh thumbnail trong Supabase Storage bucket 'covers/record-thumbnails/{user}/'
+        ok_storage = True
         try:
             list_url = f"{SUPABASE_URL}/storage/v1/object/list/{STORAGE_BUCKET}"
             del_url = f"{SUPABASE_URL}/storage/v1/object/{STORAGE_BUCKET}"
-            max_pages = 20
+            all_prefixes = []
+            max_pages = 50
+            offset = 0
+            limit = 100
+
+            # Phase 1 (List All): Read-only pagination loop
             while max_pages > 0:
                 max_pages -= 1
-                payload = {"prefix": f"record-thumbnails/{user}/", "limit": 100}
+                payload = {
+                    "prefix": f"record-thumbnails/{user}/",
+                    "limit": limit,
+                    "offset": offset
+                }
                 with requests.post(list_url, headers=headers, json=payload, timeout=10) as list_res:
-                    if list_res.status_code == 200:
-                        items = list_res.json()
-                        if not items or not isinstance(items, list):
-                            break
-                        prefixes = [f"record-thumbnails/{user}/{item['name']}" for item in items if 'name' in item]
-                        if prefixes:
-                            with requests.delete(del_url, headers=headers, json={"prefixes": prefixes}, timeout=10) as del_thumb_res:
-                                pass
-                            print(f"[SUPABASE-SYNC] [✓] Đã xóa {len(prefixes)} thumbnail của @{user} trong Storage")
-                        if len(items) < 100:
-                            break
-                    else:
+                    if list_res.status_code != 200:
+                        print(f"[SUPABASE-SYNC] [!] Lỗi liệt kê Storage thumbnail ({list_res.status_code}): {list_res.text}")
+                        ok_storage = False
                         break
+                    items = list_res.json()
+                    if not items or not isinstance(items, list):
+                        break
+                    prefixes = [f"record-thumbnails/{user}/{item['name']}" for item in items if 'name' in item]
+                    all_prefixes.extend(prefixes)
+                    offset += len(items)
+                    if len(items) < limit:
+                        break
+
+            # Phase 2 (Batch Delete): Delete all collected prefixes in batches of 100
+            if all_prefixes:
+                del_headers = get_supabase_headers("application/json")
+                for i in range(0, len(all_prefixes), limit):
+                    chunk = all_prefixes[i:i + limit]
+                    with requests.delete(del_url, headers=del_headers, json={"prefixes": chunk}, timeout=10) as del_thumb_res:
+                        if del_thumb_res.status_code in (200, 204):
+                            print(f"[SUPABASE-SYNC] [✓] Đã xóa {len(chunk)} thumbnail của @{user} trong Storage")
+                        else:
+                            print(f"[SUPABASE-SYNC] [!] Lỗi xóa Storage thumbnail ({del_thumb_res.status_code}): {del_thumb_res.text}")
+                            ok_storage = False
         except Exception as st_err:
             print(f"[SUPABASE-SYNC] [!] Lỗi dọn dẹp Storage thumbnail: {st_err}")
+            ok_storage = False
 
-        return ok_rec and ok_usr
+        return ok_rec and ok_usr and ok_storage
     except Exception as e:
         print(f"[SUPABASE-SYNC] [!] Ngoại lệ khi xóa dữ liệu streamer {user} trên Supabase: {e}")
         return False
 
-def delete_thumbnails_from_supabase(user: str, filenames: list) -> bool:
+def delete_thumbnails_from_supabase(user: str, filenames: Union[list, str]) -> bool:
     """
     Xóa danh sách ảnh thumbnail của các video tương ứng trong Supabase Storage bucket 'covers/record-thumbnails/{user}/{clean_name}.jpg'.
+    Hỗ trợ cả single filename (str) và batch filenames (list).
+    Tự động chuẩn hóa username, xử lý extension .mp4 -> .jpg, chia nhỏ batch <= 100 và xác thực HTTP 200/204.
     """
-    if not user or not filenames:
+    if not user:
         return False
+    user = str(user).strip().replace("@", "").lower()
+    if not user:
+        return False
+
+    if isinstance(filenames, str):
+        filenames = [filenames]
+    if not filenames or not isinstance(filenames, (list, tuple, set)):
+        return False
+
     try:
-        user = user.strip().replace("@", "").lower()
-        headers = get_supabase_headers()
-        prefixes = [f"record-thumbnails/{user}/{clean_filename(fn)}.jpg" for fn in filenames if fn]
+        raw_prefixes = [
+            f"record-thumbnails/{user}/{clean_filename(str(fn).strip())}.jpg"
+            for fn in filenames
+            if fn and clean_filename(str(fn).strip())
+        ]
+        prefixes = list(dict.fromkeys(raw_prefixes))
         if not prefixes:
             return True
+
         del_url = f"{SUPABASE_URL}/storage/v1/object/{STORAGE_BUCKET}"
-        with requests.delete(del_url, headers=headers, json={"prefixes": prefixes}, timeout=10) as res:
-            if res.status_code in (200, 204):
-                print(f"[SUPABASE-SYNC] [✓] Đã xóa {len(prefixes)} thumbnail của @{user} trong Supabase Storage")
-                return True
-        return False
+        del_headers = get_supabase_headers("application/json")
+        all_ok = True
+        limit = 100
+
+        for i in range(0, len(prefixes), limit):
+            chunk = prefixes[i:i + limit]
+            with requests.delete(del_url, headers=del_headers, json={"prefixes": chunk}, timeout=10) as res:
+                if res.status_code in (200, 204):
+                    print(f"[SUPABASE-SYNC] [✓] Đã xóa {len(chunk)} thumbnail của @{user} trong Supabase Storage")
+                else:
+                    print(f"[SUPABASE-SYNC] [!] Lỗi xóa thumbnail trong Storage (HTTP {res.status_code}): {res.text}")
+                    all_ok = False
+
+        return all_ok
     except Exception as e:
         print(f"[SUPABASE-SYNC] [!] Lỗi xóa thumbnail trong Storage: {e}")
         return False
+
 

@@ -570,6 +570,12 @@ def streamer_recording_worker(user, initial_room_id, auto_discover=True, stop_ev
                             gdrive_manager.set_user_recording_status_drive(user, True)
                         except Exception:
                             pass
+                        try:
+                            supabase_sync.update_streamer_status_supabase(
+                                user, is_live=True, is_recording=True, room_id=current_room_id, status="recording"
+                            )
+                        except Exception:
+                            pass
                         time.sleep(15)
                         recheck = recorder_core.check_live_details(user)
                         if recheck.get("is_live"):
@@ -601,6 +607,10 @@ def streamer_recording_worker(user, initial_room_id, auto_discover=True, stop_ev
                 time.sleep(5)
                 continue
 
+            if stop_event and getattr(stop_event, "user_deleted", False):
+                log(f"🛑 [@{user}] Streamer đã bị xóa. Hủy xử lý phân đoạn và dừng luồng ngay lập tức.")
+                break
+
             if stop_event and stop_event.is_set():
                 log(f"⏹️ [@{user}] Nhận tín hiệu dừng phiên. Đang chốt {len(part_segments)} phân đoạn hiện có để lưu trữ an toàn...")
 
@@ -631,6 +641,10 @@ def streamer_recording_worker(user, initial_room_id, auto_discover=True, stop_ev
                         break
                     time.sleep(5)
                     continue
+
+            if stop_event and getattr(stop_event, "user_deleted", False):
+                log(f"🛑 [@{user}] Streamer đã bị xóa. Hủy chuẩn hóa video và dừng luồng ngay lập tức.")
+                break
 
             # Đảm bảo video chuẩn H.264 và upscale lên 1080p (giữ nguyên fps gốc)
             try:
@@ -694,6 +708,12 @@ def streamer_recording_worker(user, initial_room_id, auto_discover=True, stop_ev
                     except Exception:
                         pass
                 else:
+                    try:
+                        supabase_sync.update_streamer_status_supabase(
+                            user, is_live=True, is_recording=True, room_id=current_room_id, status="recording"
+                        )
+                    except Exception:
+                        pass
                     try:
                         log(f"[*] [@{user}] Đang tải Phần {part_number} ({final_dur:.1f}s) lên Google Drive...")
                         tok = gdrive_manager.get_access_token()
@@ -872,27 +892,29 @@ def streamer_recording_worker(user, initial_room_id, auto_discover=True, stop_ev
                     pass
 
         # Upload trực tiếp lên Drive, không sử dụng Staging Queue
-        # Dọn dẹp file tạm nếu streamer bị xóa
+        # Dọn dẹp hoàn toàn thư mục cục bộ nếu streamer bị xóa
         is_user_deleted = bool(stop_event and getattr(stop_event, "user_deleted", False))
         if is_user_deleted:
-            log(f"🗑️ [@{user}] Streamer đã bị xóa. Dọn dẹp file tạm.")
+            log(f"🗑️ [@{user}] Streamer đã bị xóa. Xóa sạch toàn bộ thư mục cục bộ.")
             try:
                 local_u_dir = os.path.join(BASE_DIR, user)
                 if os.path.isdir(local_u_dir):
-                    for fn in os.listdir(local_u_dir):
-                        full = os.path.join(local_u_dir, fn)
-                        if os.path.isfile(full) and (re.search(r"_seg\d+\.mp4$", fn) or fn.lower().endswith(".jpg")):
-                            try:
-                                os.remove(full)
-                            except Exception:
-                                pass
-                    log(f"↳ Giữ lại video trong '{local_u_dir}' (chỉ xóa file đoạn tạm và thumbnail).")
+                    shutil.rmtree(local_u_dir, ignore_errors=True)
+                    log(f"↳ Đã xóa hoàn toàn thư mục '{local_u_dir}'.")
             except Exception:
                 pass
 
         if rec_lock_cm:
             try:
                 rec_lock_cm.__exit__(None, None, None)
+            except Exception:
+                pass
+
+        if is_user_deleted:
+            try:
+                lock_f = os.path.join(BASE_DIR, ".locks", f"{user}.recording.lock")
+                if os.path.exists(lock_f):
+                    os.remove(lock_f)
             except Exception:
                 pass
 
@@ -932,6 +954,7 @@ def run_daemon(max_minutes=210, interval=25, auto_discover=True):
 
     session_count = 0
     _DELETED_IN_DB_SET = set()
+    _SUPA_LIVE_IN_DB_SET = set()
 
     while True:
         elapsed = time.time() - start_time
@@ -1019,10 +1042,6 @@ def run_daemon(max_minutes=210, interval=25, auto_discover=True):
                     gdrive_manager.set_user_recording_status_drive(u, False)
                 except Exception:
                     pass
-                try:
-                    supabase_sync.update_streamer_status_supabase(u, is_recording=False, is_live=False, status="offline")
-                except Exception:
-                    pass
                 ACTIVE_RECORDERS.pop(u, None)
             active_now = list(ACTIVE_RECORDERS.keys())
 
@@ -1041,6 +1060,10 @@ def run_daemon(max_minutes=210, interval=25, auto_discover=True):
                 _DELETED_IN_DB_SET = {
                     d["username"] for d in all_sd
                     if d.get("is_account_deleted") or d.get("status") == "deleted"
+                }
+                _SUPA_LIVE_IN_DB_SET = {
+                    d["username"] for d in all_sd
+                    if d.get("is_live") or d.get("is_recording") or d.get("status") in ("live", "recording")
                 }
             except Exception:
                 pass
@@ -1082,7 +1105,7 @@ def run_daemon(max_minutes=210, interval=25, auto_discover=True):
             if u not in active_set and u not in drive_busy_users and u not in _SESSION_SKIP_USERS
         ]
 
-        if (not draining) and users_to_check and slots_available > 0:
+        if (not draining) and users_to_check:
             import concurrent.futures
 
             def _check(u):
@@ -1167,6 +1190,34 @@ def run_daemon(max_minutes=210, interval=25, auto_discover=True):
                 is_live = det.get("is_live", False)
                 room_id = det.get("room_id")
                 if not (is_live and room_id):
+                    if user in _SUPA_LIVE_IN_DB_SET and user not in active_set:
+                        try:
+                            supabase_sync.update_streamer_status_supabase(
+                                user, is_live=False, is_recording=False, status="offline"
+                            )
+                            _SUPA_LIVE_IN_DB_SET.discard(user)
+                        except Exception:
+                            pass
+                    continue
+
+                _SUPA_LIVE_IN_DB_SET.add(user)
+
+                # Nếu hết slot ghi hình, cập nhật trạng thái LIVE lên Supabase để web hiển thị 🟢 LIVE 24/7
+                with RECORDERS_LOCK:
+                    current_slots_left = MAX_CONCURRENT_RECORDERS - len(ACTIVE_RECORDERS)
+                if current_slots_left <= 0:
+                    try:
+                        supabase_sync.update_streamer_status_supabase(
+                            user,
+                            is_live=True,
+                            is_recording=False,
+                            room_id=room_id,
+                            nickname=det.get("nickname"),
+                            avatar_thumb=det.get("avatar_thumb"),
+                            status="live"
+                        )
+                    except Exception:
+                        pass
                     continue
 
                 # Chống lặp khởi động lại vô hạn (và gửi Telegram mỗi vòng).
@@ -1180,6 +1231,18 @@ def run_daemon(max_minutes=210, interval=25, auto_discover=True):
                     log(f"⏳ [@{user}] Luồng vừa khởi động {int(since_start)}s trước mà đã tắt. "
                         f"Chờ {int(required_cooldown - since_start)}s nữa mới khởi động lại "
                         f"(chống lặp, backoff x{backoff_mult}).")
+                    try:
+                        supabase_sync.update_streamer_status_supabase(
+                            user,
+                            is_live=True,
+                            is_recording=False,
+                            room_id=room_id,
+                            nickname=det.get("nickname"),
+                            avatar_thumb=det.get("avatar_thumb"),
+                            status="live"
+                        )
+                    except Exception:
+                        pass
                     continue
 
                 stop_ev = threading.Event()
@@ -1197,6 +1260,19 @@ def run_daemon(max_minutes=210, interval=25, auto_discover=True):
                         "stop_event": stop_ev
                     }
                 _USER_START_COOLDOWN[user] = time.time()
+                # Đồng bộ ngay lập tức lên Supabase để web nhận tín hiệu REC < 100ms
+                try:
+                    supabase_sync.update_streamer_status_supabase(
+                        user,
+                        is_live=True,
+                        is_recording=True,
+                        room_id=room_id,
+                        nickname=det.get("nickname"),
+                        avatar_thumb=det.get("avatar_thumb"),
+                        status="recording"
+                    )
+                except Exception:
+                    pass
                 log(f"🔴 PHÁT HIỆN LIVESTREAM: @{user} đang trực tiếp (Room ID: {room_id})")
                 notifier.send_telegram(f"🔴 <b>STREAMER ĐANG LIVE!</b>\n👤 <code>@{user}</code> bắt đầu phát livestream.\nĐang tự động ghi hình đa luồng HD H.264 (< 2 tiếng/phần)...")
                 t.start()

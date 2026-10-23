@@ -1007,6 +1007,7 @@ class TestAuditMemoryOptimizations(unittest.TestCase):
             return output_filename
 
         with patch("recorder_core.generate_guest_session") as mock_gs, \
+             patch("recorder_core.get_stream_candidates", return_value=["http://pull.flv/stream.flv"]), \
              patch("recorder_core.get_live_stream_url", return_value="http://pull.flv/stream.flv"), \
              patch("recorder_core.record_stream_ffmpeg", side_effect=fake_record), \
              patch("auto_h264.validate_playable_video", return_value=(True, "ok", 10.0)), \

@@ -58,6 +58,8 @@ RECORDING_LOCK = threading.Lock()
 LIVE_CACHE_LOCK = threading.Lock()
 _RECORDINGS_CACHE = {"timestamp": 0, "data": []}
 _RECORDINGS_CACHE_LOCK = threading.Lock()
+_STREAMERS_CACHE = {"timestamp": 0, "data": []}
+_STREAMERS_CACHE_LOCK = threading.Lock()
 
 def shutdown_all_recording_tasks():
     """
@@ -338,8 +340,8 @@ def clean_zombie_recordings(live_statuses=None):
             if is_local_recorder_running_for_user(u):
                 continue
 
-            # Heartbeat check: Nếu vừa cập nhật trong 3 phút (180s) -> Cloud Runner đang chạy
-            if updated_at and (now_ts - updated_at) < 180:
+            # Heartbeat check: Nếu vừa cập nhật trong 10 phút (600s) -> Cloud Runner đang chạy
+            if updated_at and (now_ts - updated_at) < 600:
                 continue
 
             # Kiểm tra trạng thái thực tế trên TikTok (BUỘC PHẢI FRESH để không bị đánh lừa bởi RAM cache cũ)
@@ -552,14 +554,14 @@ def get_users(check_live: bool = True, fresh: bool = False):
         # Bổ sung active recordings từ Supabase (bảo đảm nhận diện ngay cả khi máy chủ không có Google Drive token, vd Render)
         try:
             for u, sd in supa_streamers_map.items():
-                if sd.get("is_recording"):
+                if sd.get("is_recording") or sd.get("status") == "recording":
                     up_str = sd.get("updated_at")
                     is_fresh = True
                     if up_str:
                         try:
                             from datetime import datetime, timezone
                             dt = datetime.fromisoformat(str(up_str).replace("Z", "+00:00"))
-                            is_fresh = (datetime.now(timezone.utc) - dt).total_seconds() < 180
+                            is_fresh = (datetime.now(timezone.utc) - dt).total_seconds() < 600
                         except Exception:
                             is_fresh = True
                     if is_fresh:
@@ -576,19 +578,19 @@ def get_users(check_live: bool = True, fresh: bool = False):
                 now_ts = time.time()
                 for su, s_data in supa_streamers_map.items():
                     cached_val = LIVE_CACHE.get(su)
-                    # Kiểm tra xem bản ghi Supabase có tươi mới (< 180s) không
+                    # Kiểm tra xem bản ghi Supabase có tươi mới (< 600s) không
                     up_str = s_data.get("updated_at")
                     is_supa_fresh = False
                     if up_str:
                         try:
                             from datetime import datetime, timezone
                             dt = datetime.fromisoformat(str(up_str).replace("Z", "+00:00"))
-                            is_supa_fresh = (datetime.now(timezone.utc) - dt).total_seconds() < 180
+                            is_supa_fresh = (datetime.now(timezone.utc) - dt).total_seconds() < 600
                         except Exception:
                             is_supa_fresh = False
 
                     # Nếu Cloud Runner đang ghi hình hoặc báo live tươi mới, lập tức cập nhật LIVE_CACHE
-                    if is_supa_fresh and (s_data.get("is_recording") or s_data.get("is_live")):
+                    if is_supa_fresh and (s_data.get("is_recording") or s_data.get("is_live") or s_data.get("status") in ("live", "recording")):
                         LIVE_CACHE[su] = {
                             "is_live": True,
                             "room_id": s_data.get("room_id"),
@@ -611,7 +613,7 @@ def get_users(check_live: bool = True, fresh: bool = False):
                             "is_preview": False,
                             "avatar_thumb": s_data.get("avatar_thumb"),
                             "nickname": s_data.get("nickname"),
-                            "timestamp": now_ts,
+                            "timestamp": 0,
                         }
 
         # Probe live status: Khi fresh=True, probe toàn bộ streamer.
@@ -683,6 +685,15 @@ def get_users(check_live: bool = True, fresh: bool = False):
                             avatar_thumb=d_info.get("avatar_thumb"),
                             status="live"
                         )
+                    elif not d_info.get("is_live") and usr not in active_users:
+                        sd = supa_streamers_map.get(usr, {})
+                        if sd.get("is_live") or sd.get("is_recording") or sd.get("status") in ("live", "recording"):
+                            supabase_sync.update_streamer_status_supabase(
+                                usr,
+                                is_live=False,
+                                is_recording=False,
+                                status="offline"
+                            )
             threading.Thread(target=_bg_sync_supa_live, args=(live_statuses,), daemon=True).start()
 
         result = []
@@ -691,15 +702,15 @@ def get_users(check_live: bool = True, fresh: bool = False):
             det = live_statuses.get(u) or LIVE_CACHE.get(u, {})
             sd = supa_streamers_map.get(u, {})
 
-            # Chỉ tin cậy trạng thái live từ Supabase nếu bản ghi tươi mới (< 180s)
+            # Chỉ tin cậy trạng thái live từ Supabase nếu bản ghi tươi mới (< 600s)
             sd_live = False
-            if sd.get("is_live"):
+            if sd.get("is_live") or sd.get("status") in ("live", "recording"):
                 up_str = sd.get("updated_at")
                 if up_str:
                     try:
                         from datetime import datetime, timezone
                         dt = datetime.fromisoformat(str(up_str).replace("Z", "+00:00"))
-                        if (datetime.now(timezone.utc) - dt).total_seconds() < 180:
+                        if (datetime.now(timezone.utc) - dt).total_seconds() < 600:
                             sd_live = True
                     except Exception:
                         sd_live = False
@@ -727,6 +738,8 @@ def get_users(check_live: bool = True, fresh: bool = False):
             is_preview = det.get("is_preview", False) or sd.get("is_preview", False)
 
             result.append({
+                "id": sd.get("id"),
+                "created_at": sd.get("created_at"),
                 "username": u,
                 "nickname": nickname,
                 "avatar_thumb": avatar_thumb,
@@ -739,12 +752,19 @@ def get_users(check_live: bool = True, fresh: bool = False):
                 "is_preview": is_preview
             })
 
-        return {
+        resp = {
             "users": result,
             "streamers": users,
             "total": len(users),
             "currently_recording": list(active_users)
         }
+        try:
+            with _STREAMERS_CACHE_LOCK:
+                _STREAMERS_CACHE["data"] = result
+                _STREAMERS_CACHE["timestamp"] = time.time()
+        except Exception:
+            pass
+        return resp
     finally:
         # Thu hồi RAM sau khi xử lý endpoint nặng (curl_cffi C-level memory)
         gc.collect()
@@ -911,11 +931,26 @@ def delete_user(username: str, delete_files: bool = True, bg_tasks: BackgroundTa
     # 2. Ngắt luồng quay cục bộ ngay lập tức nếu đang quay
     with RECORDING_LOCK:
         task_info = ACTIVE_RECORDING_TASKS.pop(user, None)
-        if task_info and isinstance(task_info, dict):
-            se = task_info.get("stop_event")
-            if se:
-                se.user_deleted = True
-                se.set()
+        alt_task = ACTIVE_RECORDING_TASKS.pop(f"@{user}", None)
+        task_info = task_info or alt_task
+        for t_item in [task_info, alt_task]:
+            if t_item and isinstance(t_item, dict):
+                se = t_item.get("stop_event")
+                if se:
+                    se.user_deleted = True
+                    se.set()
+                proc = t_item.get("proc") or t_item.get("process")
+                if proc and hasattr(proc, "poll") and proc.poll() is None:
+                    try:
+                        recorder_core._safe_stop_ffmpeg(proc, timeout=2)
+                    except Exception:
+                        pass
+
+    # Runner suppression: Đặt trạng thái recording trên Drive ngay lập tức về False
+    try:
+        gdrive_manager.set_user_recording_status_drive(user, False)
+    except Exception:
+        pass
 
     # 3. Xóa dữ liệu Supabase ngay lập tức (streamers & recordings)
     try:
@@ -930,11 +965,26 @@ def delete_user(username: str, delete_files: bool = True, bg_tasks: BackgroundTa
     with _RECORDINGS_CACHE_LOCK:
         _RECORDINGS_CACHE["timestamp"] = 0
         _RECORDINGS_CACHE["data"] = [v for v in _RECORDINGS_CACHE.get("data", []) if (v.get("user") != user and v.get("username") != user)]
+    with _STREAMERS_CACHE_LOCK:
+        _STREAMERS_CACHE["timestamp"] = 0
+        _STREAMERS_CACHE["data"] = [s for s in _STREAMERS_CACHE.get("data", []) if (s.get("username") != user and s.get("username") != f"@{user}")]
+    _PIN_CACHE["checked_at"] = 0.0
+    _PIN_CACHE["value"] = None
+    with _DURATION_CACHE_LOCK:
+        keys_to_del = [k for k in _DURATION_CACHE if f"/{user}/" in k.replace("\\", "/")]
+        for k in keys_to_del:
+            _DURATION_CACHE.pop(k, None)
 
     # 5. Các tác vụ nặng (xóa Drive, cập nhật streamers.json Drive, xóa files) chạy ngầm
     def _bg_delete_streamer_cloud(usr, del_files, t_info):
         try:
             if t_info and isinstance(t_info, dict):
+                proc = t_info.get("proc") or t_info.get("process")
+                if proc and hasattr(proc, "poll") and proc.poll() is None:
+                    try:
+                        recorder_core._safe_stop_ffmpeg(proc, timeout=2)
+                    except Exception:
+                        pass
                 t = t_info.get("thread")
                 if t and hasattr(t, 'join') and t.is_alive():
                     t.join(timeout=6)
@@ -969,6 +1019,13 @@ def delete_user(username: str, delete_files: bool = True, bg_tasks: BackgroundTa
             except Exception:
                 pass
 
+            try:
+                lock_f = os.path.join(BASE_DIR, ".locks", f"{usr}.recording.lock")
+                if os.path.exists(lock_f):
+                    os.remove(lock_f)
+            except Exception:
+                pass
+
     if bg_tasks:
         bg_tasks.add_task(_bg_delete_streamer_cloud, user, delete_files, task_info)
     else:
@@ -982,73 +1039,224 @@ def delete_user(username: str, delete_files: bool = True, bg_tasks: BackgroundTa
         "users": users
     }
 
+def execute_recordings_cloud_delete(drive_ids, user_fns_map):
+    """
+    Tác vụ chạy ngầm xóa song song file video và thumbnail trên Google Drive,
+    xóa ảnh thumbnail trong Supabase Storage và dọn dẹp file local.
+    """
+    if drive_ids:
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(drive_ids), 8)) as executor:
+                list(executor.map(gdrive_manager.delete_file_drive, drive_ids))
+        except Exception as e:
+            print(f"[API] Lỗi xóa file Drive song song: {e}")
+
+    # Xóa ảnh thumbnail cover tương ứng trên Supabase Storage
+    for usr, fnames in user_fns_map.items():
+        if usr and fnames:
+            try:
+                supabase_sync.delete_thumbnails_from_supabase(usr, list(fnames))
+            except Exception as e:
+                print(f"[API] Lỗi xóa thumbnail Supabase của @{usr}: {e}")
+
+    # Dọn dẹp file local nếu tồn tại
+    for usr, fnames in user_fns_map.items():
+        if usr and fnames:
+            u_dirs = [os.path.join(BASE_DIR, usr), os.path.join(".", usr)]
+            for u_dir in u_dirs:
+                if os.path.exists(u_dir):
+                    for fn in fnames:
+                        safe_fn = os.path.basename(fn)
+                        lp = os.path.join(u_dir, safe_fn)
+                        if os.path.exists(lp):
+                            try:
+                                os.remove(lp)
+                            except Exception:
+                                pass
+                        clean_name = os.path.splitext(safe_fn)[0]
+                        thumb_lp = os.path.join(u_dir, f"{clean_name}.jpg")
+                        if os.path.exists(thumb_lp):
+                            try:
+                                os.remove(thumb_lp)
+                            except Exception:
+                                pass
+
+
 @app.delete("/api/recordings")
 async def delete_recordings_batch(request: Request, bg_tasks: BackgroundTasks = None):
     try:
         req = await request.json()
     except Exception:
         req = {}
+    if not isinstance(req, dict):
+        req = {}
 
-    filenames = req.get("filenames") or []
-    drive_file_ids = req.get("drive_file_ids") or []
-    user = (req.get("user") or "").strip().replace("@", "").lower()
+    # 1. Hỗ trợ cả payload đơn lẻ (filename, drive_file_id) và hàng loạt (filenames, drive_file_ids)
+    filenames = []
+    raw_filenames = req.get("filenames")
+    if isinstance(raw_filenames, list):
+        filenames.extend([str(fn).strip() for fn in raw_filenames if str(fn).strip()])
+    elif isinstance(raw_filenames, str) and raw_filenames.strip():
+        filenames.append(raw_filenames.strip())
 
-    # 1. Xóa Supabase database records ngay lập tức
+    single_fn = req.get("filename")
+    if single_fn and isinstance(single_fn, str) and single_fn.strip():
+        s_fn = single_fn.strip()
+        if s_fn not in filenames:
+            filenames.append(s_fn)
+
+    drive_file_ids = []
+    raw_fids = req.get("drive_file_ids")
+    if isinstance(raw_fids, list):
+        drive_file_ids.extend([str(fid).strip() for fid in raw_fids if str(fid).strip()])
+    elif isinstance(raw_fids, str) and raw_fids.strip():
+        drive_file_ids.append(raw_fids.strip())
+
+    single_fid = req.get("drive_file_id")
+    if single_fid and isinstance(single_fid, str) and single_fid.strip():
+        s_fid = single_fid.strip()
+        if s_fid not in drive_file_ids:
+            drive_file_ids.append(s_fid)
+
+    req_user = str(req.get("user") or req.get("username") or "").strip().replace("@", "").lower()
+
+    if not filenames and not drive_file_ids:
+        return {
+            "ok": True,
+            "status": "success",
+            "message": "Không có video nào cần xóa",
+            "deleted_count": 0,
+            "deleted_drive_count": 0
+        }
+
+    # 2. Pre-fetch thông tin từ Supabase 'tiktok_recordings' (drive_thumb_id, drive_file_id, username)
+    fetched_records = []
+    headers = supabase_sync.get_supabase_headers()
+
     if filenames:
-        try:
-            headers = supabase_sync.get_supabase_headers()
-            quoted_names = ",".join([f'"{fn}"' for fn in filenames])
-            del_url = f"{supabase_sync.SUPABASE_URL}/rest/v1/tiktok_recordings?filename=in.({quoted_names})"
-            requests.delete(del_url, headers=headers, timeout=5)
-        except Exception as e:
-            print(f"[API] Lỗi xóa bản ghi Supabase: {e}")
+        for i in range(0, len(filenames), 25):
+            chunk = filenames[i:i + 25]
+            quoted_chunk = ",".join([f'"{fn}"' for fn in chunk])
+            q_url = f"{supabase_sync.SUPABASE_URL}/rest/v1/tiktok_recordings?select=filename,drive_file_id,drive_thumb_id,username&filename=in.({quoted_chunk})"
+            try:
+                with requests.get(q_url, headers=headers, timeout=5) as q_res:
+                    if q_res.status_code == 200:
+                        recs = q_res.json()
+                        if isinstance(recs, list):
+                            fetched_records.extend(recs)
+            except Exception as e:
+                print(f"[API] Lỗi pre-fetch tiktok_recordings theo filename: {e}")
 
-    # 2. Invalidate cache RAM ngay lập tức
+    # Nếu có drive_file_ids chưa được match, truy vấn thêm theo drive_file_id
+    matched_fids = {r.get("drive_file_id") for r in fetched_records if r.get("drive_file_id")}
+    remaining_fids = [fid for fid in drive_file_ids if fid not in matched_fids]
+    if remaining_fids:
+        for i in range(0, len(remaining_fids), 25):
+            chunk = remaining_fids[i:i + 25]
+            quoted_chunk = ",".join([f'"{fid}"' for fid in chunk])
+            q_url = f"{supabase_sync.SUPABASE_URL}/rest/v1/tiktok_recordings?select=filename,drive_file_id,drive_thumb_id,username&drive_file_id=in.({quoted_chunk})"
+            try:
+                with requests.get(q_url, headers=headers, timeout=5) as q_res:
+                    if q_res.status_code == 200:
+                        recs = q_res.json()
+                        if isinstance(recs, list):
+                            fetched_records.extend(recs)
+            except Exception as e:
+                print(f"[API] Lỗi pre-fetch tiktok_recordings theo drive_file_id: {e}")
+
+    # Tổng hợp danh sách Drive thumbnail IDs, video file IDs, filenames và ánh xạ user -> filenames
+    drive_thumb_ids = []
+    all_video_fids = list(drive_file_ids)
+    all_filenames = list(filenames)
+    user_to_filenames = {}
+
+    for r in fetched_records:
+        r_fid = (r.get("drive_file_id") or "").strip()
+        if r_fid and r_fid not in all_video_fids:
+            all_video_fids.append(r_fid)
+
+        r_tid = (r.get("drive_thumb_id") or "").strip()
+        if r_tid and r_tid not in drive_thumb_ids:
+            drive_thumb_ids.append(r_tid)
+
+        r_fn = (r.get("filename") or "").strip()
+        if r_fn and r_fn not in all_filenames:
+            all_filenames.append(r_fn)
+
+        r_usr = (r.get("username") or "").strip().replace("@", "").lower()
+        if r_usr and r_fn:
+            user_to_filenames.setdefault(r_usr, set()).add(r_fn)
+
+    # Bổ sung filenames cho user truyền trong request (nếu có)
+    if req_user:
+        for fn in all_filenames:
+            user_to_filenames.setdefault(req_user, set()).add(fn)
+
+    # Bổ sung suy luận user từ filename (định dạng username_YYYY-MM-DD...) nếu chưa có
+    for fn in all_filenames:
+        if not any(fn in fns for fns in user_to_filenames.values()):
+            parts = fn.split("_")
+            if len(parts) >= 2:
+                inferred_user = parts[0].strip().replace("@", "").lower()
+                if inferred_user:
+                    user_to_filenames.setdefault(inferred_user, set()).add(fn)
+
+    # 3. Xóa Supabase database records ngay lập tức
+    if all_filenames:
+        try:
+            for i in range(0, len(all_filenames), 25):
+                chunk = all_filenames[i:i + 25]
+                quoted_names = ",".join([f'"{fn}"' for fn in chunk])
+                del_url = f"{supabase_sync.SUPABASE_URL}/rest/v1/tiktok_recordings?filename=in.({quoted_names})"
+                requests.delete(del_url, headers=headers, timeout=5)
+        except Exception as e:
+            print(f"[API] Lỗi xóa bản ghi Supabase theo filename: {e}")
+
+    if all_video_fids:
+        try:
+            for i in range(0, len(all_video_fids), 25):
+                chunk = all_video_fids[i:i + 25]
+                quoted_fids = ",".join([f'"{fid}"' for fid in chunk])
+                del_url = f"{supabase_sync.SUPABASE_URL}/rest/v1/tiktok_recordings?drive_file_id=in.({quoted_fids})"
+                requests.delete(del_url, headers=headers, timeout=5)
+        except Exception as e:
+            print(f"[API] Lỗi xóa bản ghi Supabase theo drive_file_id: {e}")
+
+    # 4. Invalidate cache RAM ngay lập tức (_RECORDINGS_CACHE và _DURATION_CACHE)
     with _RECORDINGS_CACHE_LOCK:
         _RECORDINGS_CACHE["timestamp"] = 0
-        if filenames:
-            fn_set = set(filenames)
-            _RECORDINGS_CACHE["data"] = [v for v in _RECORDINGS_CACHE.get("data", []) if v.get("filename") not in fn_set]
+        fn_set = set(all_filenames)
+        fid_set = set(all_video_fids)
+        _RECORDINGS_CACHE["data"] = [
+            v for v in _RECORDINGS_CACHE.get("data", [])
+            if v.get("filename") not in fn_set and v.get("drive_file_id") not in fid_set
+        ]
 
-    # 3. Tác vụ xóa file Drive & local chạy ngầm đa luồng cực nhanh
-    def _bg_delete_files(fids, usr, fnames):
-        if fids:
-            try:
-                with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(fids), 8)) as executor:
-                    list(executor.map(gdrive_manager.delete_file_drive, fids))
-            except Exception as e:
-                print(f"[API] Lỗi xóa file Drive song song: {e}")
+    with _DURATION_CACHE_LOCK:
+        if all_filenames:
+            fn_set = set(all_filenames)
+            keys_to_del = [
+                k for k in _DURATION_CACHE
+                if any(os.path.basename(k) == fn or k.endswith(fn) for fn in fn_set)
+            ]
+            for k in keys_to_del:
+                _DURATION_CACHE.pop(k, None)
 
-        # Xóa ảnh thumbnail cover tương ứng trên Supabase Storage
-        if usr and fnames:
-            try:
-                supabase_sync.delete_thumbnails_from_supabase(usr, fnames)
-            except Exception as e:
-                print(f"[API] Lỗi xóa thumbnail Supabase: {e}")
-
-        if usr and fnames:
-            u_dir = os.path.join(".", usr)
-            if os.path.exists(u_dir):
-                for fn in fnames:
-                    safe_fn = os.path.basename(fn)
-                    lp = os.path.join(u_dir, safe_fn)
-                    if os.path.exists(lp):
-                        try:
-                            os.remove(lp)
-                        except Exception:
-                            pass
+    # 5. Tác vụ xóa Google Drive (.mp4 + .jpg thumbnail) & Supabase Storage & local file
+    all_drive_ids = list(dict.fromkeys(all_video_fids + drive_thumb_ids))
 
     if bg_tasks:
-        bg_tasks.add_task(_bg_delete_files, drive_file_ids, user, filenames)
+        bg_tasks.add_task(execute_recordings_cloud_delete, all_drive_ids, user_to_filenames)
     else:
-        threading.Thread(target=_bg_delete_files, args=(drive_file_ids, user, filenames), daemon=True).start()
+        threading.Thread(target=execute_recordings_cloud_delete, args=(all_drive_ids, user_to_filenames), daemon=True).start()
 
+    deleted_count = len(all_filenames) if all_filenames else len(all_video_fids)
     return {
         "ok": True,
         "status": "success",
-        "message": f"Đã xóa {len(filenames)} video thành công!",
-        "deleted_count": len(filenames),
-        "deleted_drive_count": len(drive_file_ids)
+        "message": f"Đã xóa {deleted_count} video thành công!",
+        "deleted_count": deleted_count,
+        "deleted_drive_count": len(all_drive_ids)
     }
 
 @app.get("/api/stream/{username}")
@@ -1235,6 +1443,12 @@ def bg_record_worker(user: str, duration: Optional[int] = None, stop_event: Opti
                 last_heartbeat_at = time.time()
                 try:
                     gdrive_manager.set_user_recording_status_drive(user, True)
+                except Exception:
+                    pass
+                try:
+                    supabase_sync.update_streamer_status_supabase(
+                        user, is_live=True, is_recording=True, status="recording"
+                    )
                 except Exception:
                     pass
 
@@ -1717,6 +1931,12 @@ def bg_record_worker(user: str, duration: Optional[int] = None, stop_event: Opti
                 gdrive_manager.set_user_recording_status_drive(user, False)
             except Exception:
                 pass
+            try:
+                supabase_sync.update_streamer_status_supabase(
+                    user, is_live=False, is_recording=False, status="offline"
+                )
+            except Exception:
+                pass
 
         # Upload trực tiếp lên Drive, không sử dụng Staging Queue
 
@@ -1806,6 +2026,18 @@ def start_record(req: RecordRequest, bg_tasks: BackgroundTasks):
                 gdrive_manager.set_user_recording_status_drive(user, True)
             except Exception:
                 pass
+            try:
+                supabase_sync.update_streamer_status_supabase(
+                    user,
+                    is_live=True,
+                    is_recording=True,
+                    room_id=room_id,
+                    nickname=live_details.get("nickname") if isinstance(live_details, dict) else None,
+                    avatar_thumb=live_details.get("avatar_thumb") if isinstance(live_details, dict) else None,
+                    status="recording"
+                )
+            except Exception:
+                pass
             bg_tasks.add_task(bg_record_worker, user, req.duration_seconds, stop_evt)
 
         if not has_ffmpeg:
@@ -1887,6 +2119,10 @@ def stop_record(req: AddUserRequest):
                     ACTIVE_RECORDING_TASKS.pop(user, None)
     try:
         gdrive_manager.set_user_recording_status_drive(user, False)
+    except Exception:
+        pass
+    try:
+        supabase_sync.update_streamer_status_supabase(user, is_recording=False, status="offline")
     except Exception:
         pass
     return {

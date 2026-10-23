@@ -1091,7 +1091,18 @@ def record_stream_ffmpeg(stream_url, output_filename=None, target_user: Optional
         last_size = 0
         last_growth_time = time.time()
         last_live_check_time = time.time()
+        last_heartbeat_time = time.time()
         consecutive_offline_checks = 0
+
+        # Gửi ngay tín hiệu recording khi vừa khởi động tiến trình FFmpeg
+        if target_user:
+            try:
+                import supabase_sync
+                supabase_sync.update_streamer_status_supabase(
+                    target_user, is_live=True, is_recording=True, status="recording"
+                )
+            except Exception:
+                pass
 
         while proc.poll() is None:
             if stop_event and stop_event.is_set():
@@ -1116,6 +1127,22 @@ def record_stream_ffmpeg(stream_url, output_filename=None, target_user: Optional
                 last_growth_time = now
 
             stagnant_seconds = int(now - last_growth_time)
+
+            # Gia hạn heartbeat 60s cho Google Drive và Supabase để web-truyen luôn nhận tín hiệu đang ghi hình
+            if target_user and (now - last_heartbeat_time) >= 60:
+                last_heartbeat_time = now
+                try:
+                    import gdrive_manager
+                    gdrive_manager.set_user_recording_status_drive(target_user, True)
+                except Exception:
+                    pass
+                try:
+                    import supabase_sync
+                    supabase_sync.update_streamer_status_supabase(
+                        target_user, is_live=True, is_recording=True, status="recording"
+                    )
+                except Exception:
+                    pass
 
             # Tự động chốt phân đoạn khi đạt thời lượng tối đa (mặc định 1 tiếng = 3600s)
             if duration and elapsed >= duration:
