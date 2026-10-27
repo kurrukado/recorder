@@ -48,3 +48,12 @@ gradio_space/
 huggingface_space/
 .pytest_cache/
 test_*_user/
+
+# Tests & Test Runners (Excluded from GitHub repository)
+test_*.py
+test_*.mjs
+*_test.py
+quick_api_test.py
+
+# Multi-Agent and Subagent Logs/Scratch
+.agents/

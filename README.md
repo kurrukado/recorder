@@ -1,4 +1,4 @@
-# TikTok 24/7 Auto Recorder
+# Recorder - 24/7 Auto Stream Recorder
 
 > [!IMPORTANT]
 > This was completely made by AI so it will cause unexpected bugs but i will commit fixes if its happen, it may takes times

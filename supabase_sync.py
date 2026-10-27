@@ -169,6 +169,8 @@ def update_streamer_status_supabase(user: str, is_live: Optional[bool] = None, i
             payload["is_recording"] = is_recording
         if room_id is not None and not payload.get("is_account_deleted"):
             payload["room_id"] = str(room_id) if room_id else None
+        elif ((is_live is False and is_recording is False) or status == "offline") and not payload.get("is_account_deleted"):
+            payload["room_id"] = None
         if nickname is not None:
             payload["nickname"] = nickname
         if avatar_thumb is not None:

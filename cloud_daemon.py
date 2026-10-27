@@ -224,6 +224,13 @@ def streamer_recording_worker(user, initial_room_id, auto_discover=True, stop_ev
     if not got_lock:
         rec_lock_cm.__exit__(None, None, None)
         rec_lock_cm = None
+        with RECORDERS_LOCK:
+            ACTIVE_RECORDERS.pop(user, None)
+        if not getattr(stop_event, "user_deleted", False):
+            try:
+                supabase_sync.update_streamer_status_supabase(user, is_live=False, is_recording=False, status="offline")
+            except Exception:
+                pass
         log(f"⚠️ [@{user}] Streamer đang được ghi hình bởi tiến trình khác trên hệ thống. Bỏ qua luồng này.")
         return
 
@@ -570,12 +577,13 @@ def streamer_recording_worker(user, initial_room_id, auto_discover=True, stop_ev
                             gdrive_manager.set_user_recording_status_drive(user, True)
                         except Exception:
                             pass
-                        try:
-                            supabase_sync.update_streamer_status_supabase(
-                                user, is_live=True, is_recording=True, room_id=current_room_id, status="recording"
-                            )
-                        except Exception:
-                            pass
+                        if not getattr(stop_event, "user_deleted", False):
+                            try:
+                                supabase_sync.update_streamer_status_supabase(
+                                    user, is_live=True, is_recording=False, room_id=current_room_id, status="live"
+                                )
+                            except Exception:
+                                pass
                         time.sleep(15)
                         recheck = recorder_core.check_live_details(user)
                         if recheck.get("is_live"):
@@ -708,12 +716,20 @@ def streamer_recording_worker(user, initial_room_id, auto_discover=True, stop_ev
                     except Exception:
                         pass
                 else:
-                    try:
-                        supabase_sync.update_streamer_status_supabase(
-                            user, is_live=True, is_recording=True, room_id=current_room_id, status="recording"
-                        )
-                    except Exception:
-                        pass
+                    if not offline_confirmed:
+                        try:
+                            supabase_sync.update_streamer_status_supabase(
+                                user, is_live=True, is_recording=True, room_id=current_room_id, status="recording"
+                            )
+                        except Exception:
+                            pass
+                    else:
+                        try:
+                            supabase_sync.update_streamer_status_supabase(
+                                user, is_live=False, is_recording=False, status="offline"
+                            )
+                        except Exception:
+                            pass
                     try:
                         log(f"[*] [@{user}] Đang tải Phần {part_number} ({final_dur:.1f}s) lên Google Drive...")
                         tok = gdrive_manager.get_access_token()
@@ -868,10 +884,15 @@ def streamer_recording_worker(user, initial_room_id, auto_discover=True, stop_ev
         stale_worker = False
         with RECORDERS_LOCK:
             reg = ACTIVE_RECORDERS.get(user)
-            if reg and isinstance(reg, dict) and reg.get("thread") is threading.current_thread():
-                ACTIVE_RECORDERS.pop(user, None)
+            if reg and isinstance(reg, dict):
+                if reg.get("thread") is threading.current_thread():
+                    ACTIVE_RECORDERS.pop(user, None)
+                    stale_worker = False
+                else:
+                    stale_worker = True
             else:
-                stale_worker = True
+                ACTIVE_RECORDERS.pop(user, None)
+                stale_worker = False
         if stale_worker:
             log(f"⚠️ [@{user}] Luồng cũ kết thúc nhưng không còn là luồng đang đăng ký. Bỏ qua cập nhật trạng thái để không ảnh hưởng luồng mới.")
         else:
@@ -963,7 +984,17 @@ def run_daemon(max_minutes=210, interval=25, auto_discover=True):
         with RECORDERS_LOCK:
             dead_users = [u for u, info in ACTIVE_RECORDERS.items() if not info["thread"].is_alive()]
             for u in dead_users:
-                ACTIVE_RECORDERS.pop(u, None)
+                info = ACTIVE_RECORDERS.pop(u, None)
+                stop_ev = info.get("stop_event") if isinstance(info, dict) else None
+                try:
+                    gdrive_manager.set_user_recording_status_drive(u, False)
+                except Exception:
+                    pass
+                if not getattr(stop_ev, "user_deleted", False):
+                    try:
+                        supabase_sync.update_streamer_status_supabase(u, is_recording=False, is_live=False, status="offline")
+                    except Exception:
+                        pass
             active_now = list(ACTIVE_RECORDERS.keys())
 
         # Đọc kết quả các phiên vừa kết thúc -> cập nhật backoff và danh sách tạm bỏ qua.

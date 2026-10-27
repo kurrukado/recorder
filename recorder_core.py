@@ -1128,8 +1128,8 @@ def record_stream_ffmpeg(stream_url, output_filename=None, target_user: Optional
 
             stagnant_seconds = int(now - last_growth_time)
 
-            # Gia hạn heartbeat 60s cho Google Drive và Supabase để web-truyen luôn nhận tín hiệu đang ghi hình
-            if target_user and (now - last_heartbeat_time) >= 60:
+            # Gia hạn heartbeat 30s cho Google Drive và Supabase để web-truyen luôn nhận tín hiệu đang ghi hình
+            if target_user and (now - last_heartbeat_time) >= 30:
                 last_heartbeat_time = now
                 try:
                     import gdrive_manager

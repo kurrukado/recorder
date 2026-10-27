@@ -1,4 +1,4 @@
-name: TikTok 24-7 Auto Recorder
+name: Recorder 24-7 Auto Recorder
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
     - cron: '*/50 * * * *'
 
 concurrency:
-  group: tiktok-recorder-runner
+  group: recorder-runner
   cancel-in-progress: false
 
 env:

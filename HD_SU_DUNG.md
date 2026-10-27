@@ -121,7 +121,7 @@ Google Drive
 ## 4. VẬN HÀNH 24/7 TRÊN GITHUB ACTIONS (CLOUD RUNNER)
 
 ### Bước 1: Thiết lập Quyền Workflow
-1. Mở repository: `https://github.com/kurrukado/tiktok-recorder`
+1. Mở repository: `https://github.com/kurrukado/recorder`
 2. Vào **Settings** ➔ Menu bên trái chọn **Actions** ➔ **General**.
 3. Kéo xuống mục **Workflow permissions** ➔ Chọn: **Read and write permissions** ➔ Bấm **Save**.
 
@@ -188,7 +188,7 @@ Website Kuru Hub (`web-truyen`) được thiết kế theo kiến trúc **Cloud-
 ### 3. Kích hoạt Ghi hình Tức thì qua GitHub Actions Dispatch API
 Gửi request từ Next.js / Node.js backend khi cần ép runner khởi chạy ngay lập tức:
 ```javascript
-await fetch('https://api.github.com/repos/kurrukado/tiktok-recorder/actions/workflows/recorder.yml/dispatches', {
+await fetch('https://api.github.com/repos/kurrukado/recorder/actions/workflows/recorder.yml/dispatches', {
   method: 'POST',
   headers: {
     'Accept': 'application/vnd.github+v3+json',
@@ -245,4 +245,4 @@ Khi cần ghi hình các phòng live giới hạn độ tuổi (18+) hoặc VIP 
 1. Đăng nhập tài khoản TikTok trên trình duyệt máy tính.
 2. Bấm phím **F12** ➔ Chọn tab **Application** (hoặc **Bộ nhớ**) ➔ Chọn mục **Cookies** (`https://www.tiktok.com`).
 3. Tìm dòng có tên **`sessionid_ss`** và sao chép chuỗi ký tự giá trị.
-4. Cập nhật vào secret **`TIKTOK_SESSION_ID`** trong **GitHub Secrets** của repository `kurrukado/tiktok-recorder`.
+4. Cập nhật vào secret **`TIKTOK_SESSION_ID`** trong **GitHub Secrets** của repository `kurrukado/recorder`.
