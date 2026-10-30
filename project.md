@@ -27,18 +27,22 @@ The system consists of two primary subsystems operating under the "Cloud 24/7" r
 | 10 | Worker Termination & Stale Check Fix | Prevent race condition in worker `finally:` block where daemon dead thread pruning caused status cleanup to be skipped. | M3 | Survey Explorer 2 |
 | 11 | Disconnect & Upload Status Integrity | Do not assert `is_recording: true` during 5-minute disconnect wait or Google Drive upload when offline confirmed. | M3 | Survey Explorer 2 |
 | 12 | Heartbeat Tightening | Pulse active FFmpeg recording heartbeat every 30s instead of 60s in `recorder_core.py`. | M3 | Survey Explorer 2 |
-| 13 | E2E Acceptance & Audit Suite Pass | Ensure 100% pass on `test_audit_suite.py` and `test_milestone4_e2e_acceptance.py`. | M4 | Survey Explorer 2 |
+| 13 | E2E Acceptance & Audit Suite | *(Lịch sử)* Test suite đã bị xóa ở commit `52418b8`. Thay bằng `py_compile` + `check_status.py`. | M4 | Survey Explorer 2 |
 | 14 | Frontend Build Verification | Ensure `npm run build` exits 0 on `D:\web-truyen`. | M4 | Survey Explorer 1 |
 | 15 | Forensic Integrity Verification | Audit against hardcoded values, dummy stubs, and verify genuine end-to-end sync logic. | M5 | Forensic Auditor |
+| 16 | Add-While-Live Latency Fix | Fast-Poll 5s phát hiện streamer mới + bỏ đảo danh sách ưu tiên + reset backoff cho username mới → add lúc live ghi hình trong ~5–8s. | M6 | Post-audit |
+| 17 | Duplicate Local Recording Guard | `POST /api/users` không mở luồng ghi local nếu Drive còn heartbeat cloud < 180s (chống 2 video trùng). | M6 | Post-audit |
+| 18 | Docs Reality Sync | Sửa README/HD_SU_DUNG/project.md cho khớp code thật (staging queue chưa nối, test suite đã xóa, độ trễ thực tế). | M6 | Post-audit |
 
 ## Milestones
 | # | Name | Scope | Dependencies | Status |
 |---|------|-------|-------------|--------|
-| M1 | Data Management & Supabase Cleanup (R3) | Reconcile `tiktok_streamers` on Supabase; clear ghost recordings; clean Google Drive `active_recordings.json`. | None | DONE (cleanup_ghost_recordings.py verified, 0 ghost recordings, 114/114 tests pass) |
-| M2 | Frontend API Proxy & Web UI (R1, R2) | Sửa `route.js` và `page.js` trên `D:\web-truyen` theo quy tắc nhận diện live nghiêm ngặt, khử speculative recording, chỉnh stale guard, và thêm live polling. | None | DONE (npm run build exit 0, 100% tests pass) |
-| M3 | Backend Heartbeat & Lifecycle (R4) | Sửa `supabase_sync.py`, `cloud_daemon.py`, và `recorder_core.py` trên `d:\recorder` cho heartbeat và lifecycle sạch. | None | DONE (30s heartbeat, room_id=None on offline, 113/113 tests pass) |
-| M4 | QA, Build & Adversarial Review | Chạy `npm run build` trên `D:\web-truyen`, chạy unittest suites trên `d:\recorder`, kiểm tra các ca biên. | M1, M2, M3 | DONE (Reviewers & Challenger APPROVED, npm run build exit 0, 100% tests pass) |
+| M1 | Data Management & Supabase Cleanup (R3) | Reconcile `tiktok_streamers` on Supabase; clear ghost recordings; clean Google Drive `active_recordings.json`. | None | DONE (cleanup_ghost_recordings.py verified, 0 ghost recordings) |
+| M2 | Frontend API Proxy & Web UI (R1, R2) | Sửa `route.js` và `page.js` trên `D:\web-truyen` theo quy tắc nhận diện live nghiêm ngặt, khử speculative recording, chỉnh stale guard, và thêm live polling. | None | DONE (npm run build exit 0) |
+| M3 | Backend Heartbeat & Lifecycle (R4) | Sửa `supabase_sync.py`, `cloud_daemon.py`, và `recorder_core.py` trên `d:\recorder` cho heartbeat và lifecycle sạch. | None | DONE (30s heartbeat, room_id=None on offline) |
+| M4 | QA, Build & Adversarial Review | Chạy `npm run build` trên `D:\web-truyen`, kiểm tra các ca biên. *(Test suite đã bị xóa ở commit `52418b8` — số liệu pass cũ là lịch sử.)* | M1, M2, M3 | DONE (npm run build exit 0) |
 | M5 | Forensic Integrity Audit | Kiểm định độc lập toàn diện tính toàn vẹn của mã nguồn và dữ liệu. | M4 | DONE (Auditor verdict CLEAN, 0 integrity violations, 0 facades) |
+| M6 | Add-While-Live Latency & Docs Sync | Fast-Poll 5s, sửa thứ tự ưu tiên kiểm tra, reset backoff username mới, chặn ghi trùng local/cloud, đồng bộ lại toàn bộ .md với code thật. | M5 | DONE (verify: py_compile + check_status.py, 105 streamer / 2 recording / heartbeat 24–30s) |
 
 ## Interface Contracts
 ### Next.js API Proxy (`route.js`) ↔ TikTok API (`/api-live/user/room/`)
@@ -62,6 +66,19 @@ The system consists of two primary subsystems operating under the "Cloud 24/7" r
 - Offline transition: `update_streamer_status_supabase(user, is_live=False, is_recording=False, status="offline")` sets `payload["room_id"] = None`.
 - Deletion Guard: NEVER call status sync when `getattr(stop_event, "user_deleted", False) == True`.
 
+### Add-While-Live Latency Contract
+- `load_monitored_users()` refreshes the full list from Supabase when `now - _LAST_DRIVE_CHECK > 15` (Drive sync only on this path).
+- `_fast_poll_new_streamers()` runs every `FAST_POLL_SECONDS = 5` inside the inter-loop sleep, issues **1 lightweight REST call** (`select=username&order=id.desc`), and only handles ADDED usernames (no pruning).
+- On detecting new usernames it MUST: update `_CACHED_DRIVE_USERS` (newest first), call `_reset_user_backoff()` (clear `_USER_START_COOLDOWN`, `_USER_FAILURE_STREAK`, `_SESSION_SKIP_USERS`), and break the sleep early.
+- `users_to_check` MUST preserve Supabase order (`order=id.desc` → newest first). **Never `reversed()`** — that would check the just-added streamer last.
+- Budget: **≤ 8s** from row insert to `is_recording = true` when a runner is active with a free slot.
+- `POST /api/users` (local FastAPI) MUST NOT start a local recording worker when Drive heartbeat for that user is < 180s old (cloud is already recording).
+
+### Recording Durability Contract
+- Each part is at most `MAX_CHUNK_SECONDS = 3600`; a part is uploaded to Drive + Supabase as soon as it completes.
+- Runner rotation: DRAIN after `--duration-minutes` (170), grace `DRAIN_GRACE_SECONDS = 6*60`, hard limit `max_seconds + 10*60`.
+- Known limitation: a hard kill/cancel loses the in-progress part (local disk only). `staging_queue.py` is NOT wired into the capture path.
+
 ## Code Layout
 - `D:\web-truyen\app\api\record\[...path]\route.js` (Owned by Worker Frontend)
 - `D:\web-truyen\app\record\page.js` (Owned by Worker Frontend)
@@ -69,3 +86,4 @@ The system consists of two primary subsystems operating under the "Cloud 24/7" r
 - `d:\recorder\supabase_sync.py` (Owned by Worker Backend)
 - `d:\recorder\cloud_daemon.py` (Owned by Worker Backend)
 - `d:\recorder\recorder_core.py` (Owned by Worker Backend)
+- `d:\recorder\check_status.py` (Ops — kiểm tra live/recording/heartbeat thật từ Supabase)

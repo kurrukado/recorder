@@ -46,7 +46,8 @@ Hệ thống tự động theo dõi và ghi hình livestream TikTok chuẩn HD H
 ┌───────────────────┴──────────────────┐           │
 │    GITHUB ACTIONS (PUBLIC RUNNER)    │           │
 │  - Chạy 24/7 vĩnh viễn (UNLIMITED)   │           │
-│  - Quét streamers từ Supabase mỗi 20s│           │
+│  - Quét streamers từ Supabase mỗi 15s│           │
+│  - Fast-Poll 5s bắt streamer mới     │           │
 │  - Ghi đồng thời lên đến 10 streamer │           │
 │  - Continuous Relay + Cron 50 phút   │           │
 │  - Ưu tiên HLS H.264 chống lỗi NAL   │           │
@@ -68,17 +69,22 @@ Hệ thống tự động theo dõi và ghi hình livestream TikTok chuẩn HD H
 ## 2. CÁC TÍNH NĂNG NỔI BẬT
 
 * ☁️ **Hoạt Động 100% Đám Mây 24/7 (Không Phụ Thuộc Máy Tính Cá Nhân):**
-  - Quét danh sách streamer mỗi 20 giây và tự động ghi hình trên GitHub Actions Cloud.
+  - Quét danh sách streamer mỗi 15 giây (Supabase là nguồn chuẩn) + Fast-Poll 5 giây riêng cho streamer vừa thêm.
   - Người dùng có thể tắt máy tính hoàn toàn, hệ thống vẫn duy trì ghi hình, upload Google Drive và cập nhật Supabase 24/7.
+* ⚡ **Thêm Streamer Lúc Đang Live → Ghi Hình Trong ~5–8 Giây:**
+  - Khi bạn thêm một streamer đang phát live, web hiện `🔴 LIVE` ngay lập tức (do API kiểm tra TikTok trực tiếp), sau đó daemon bật `is_recording = true` và hiện `🔴 REC` sau **~5–8 giây** nếu runner đang chạy.
+  - Cơ chế: Fast-Poll 5s phát hiện username mới → thoát sleep sớm → kiểm tra live **đầu tiên** trong hàng đợi → khởi động luồng ghi.
+  - Nếu **không có runner nào đang chạy**, cần chờ runner khởi động (~1–3 phút: boot + cài ffmpeg/deps). Nếu web không cấu hình `GITHUB_PAT`/`WORKFLOW_PAT` thì phải chờ cron 50 phút.
 * ♾️ **100% Unlimited Minutes (Public Repo):**
   - Chạy trên GitHub Actions ở chế độ **Public Repository** được hưởng chính sách **Không giới hạn phút chạy miễn phí** của GitHub (giải quyết triệt để hạn mức 2.000 phút/tháng của repo Private).
   - Toàn bộ thông tin nhạy cảm (`GDRIVE_REFRESH_TOKEN`, `SUPABASE_KEY`...) được bảo vệ tuyệt đối qua **GitHub Secrets**, `.gitignore` ngăn chặn 100% rò rỉ mã bí mật.
 * 🛡️ **Khắc Phục Triệt Để Lỗi Bitstream NAL Unit (FLV Sequence Header):**
   - Cơ chế nhận diện luồng thông minh: Luôn ưu tiên luồng chuẩn **HLS H.264 (MPEG-TS)** thay vì FLV.
   - Tích hợp bộ tiền xử lý **ISO/IEC 14496-15 AVCC Bitstream Sanitizer** trong `auto_h264.py`: Tự động loại bỏ mã rác `01 64 00 1f...` do TikTok nhúng vào đầu keyframe, giải quyết dứt điểm lỗi màn hình đen hoặc thông báo *"Video file is processing slowly due to exceeding upload quota limits"* trên Google Drive.
-* 📦 **Zero-Loss Staging Queue:**
-  - Tự động chia nhỏ video thành các phân đoạn ngắn lưu trữ tạm trong thư mục `staging/` trên Google Drive. Khi streamer ngắt kết nối đột ngột hoặc runner hết phiên, không bao giờ bị mất video.
-  - Tự động ghép nối video hoàn chỉnh ngay khi live kết thúc, trích xuất ảnh thumbnail chính giữa video và truyền `drive_thumb_id` lên Supabase.
+* 📦 **Ghi Theo Part 1 Giờ + Graceful Drain (Chống Mất Video Khi Luân Chuyển Runner):**
+  - Video được ghi thành từng part tối đa 1 giờ (`MAX_CHUNK_SECONDS = 3600`), **mỗi part upload lên Drive & Supabase ngay khi hoàn tất** (không dồn tới cuối buổi live).
+  - Khi runner hết phiên (170 phút), daemon vào pha **DRAIN**: ngừng nhận streamer mới, phát lệnh dừng mềm để ffmpeg chốt file, chờ tối đa 6 phút cho các luồng upload xong rồi mới kết thúc job.
+  - ⚠️ **Giới hạn thật:** nếu runner bị **cancel / kill cứng** (hủy job, runner bị thu hồi), part đang ghi dở (tối đa 1 giờ) **sẽ mất** vì đĩa của runner là tạm và file chưa được upload. Module `staging_queue.py` (upload từng đoạn ngắn lên Drive) có sẵn nhưng **chưa được nối vào luồng ghi chính** — hiện chỉ dùng cho hàm dọn `check_and_flush_idle_queues()`.
 * 🗑️ **Dọn Sạch 100% Cover Thumbnail Supabase Storage Khi Xóa:**
   - Khi xóa streamer: Tự động quét và dọn sạch toàn bộ thư mục ảnh thumbnail `record-thumbnails/{user}/` trong bucket `covers` trên Supabase Storage, đồng thời xóa bản ghi trong database.
   - Khi xóa video lẻ hoặc hàng loạt: Tự động xóa chính xác file ảnh `.jpg` tương ứng trong bucket `covers`, không để lại rác bộ nhớ.
@@ -88,7 +94,7 @@ Hệ thống tự động theo dõi và ghi hình livestream TikTok chuẩn HD H
   - Workflow `.github/workflows/repair-watchdog.yml` chạy tự động mỗi 6 giờ (`0 */6 * * *`) kích hoạt `repair_cloud_videos_engine.py --today`.
   - Tự động rà soát mọi bản ghi trong ngày, sửa chữa bitstream in-place trên Google Drive và bù thumbnail vào Supabase Storage nếu có phiên bị lỗi mạng.
 * ⚡ **Live-End Watchdog & Tách File 1 Tiếng:**
-  - Tự động nhận biết phòng live tắt sóng chỉ trong 15-30 giây.
+  - Tự động nhận biết phòng live tắt sóng trong ~7 giây (kiểm tra lại 2 lần), sau đó chờ `offline_confirm_seconds` (mặc định 300s) để chắc chắn không phải đứt CDN thoáng qua rồi mới chốt video.
   - Hỗ trợ tách file 1 giờ (`MAX_CHUNK_SECONDS = 3600`) cho các phiên phát trực tiếp xuyên đêm, tránh tràn bộ nhớ đệm.
 * 🌐 **Google Edge CDN Tua Video Tức Thì (HTTP Range 206):**
   - Tự động gán cờ `+faststart` (đưa atom `moov` lên đầu file) cho phép trình duyệt HTML5 phát ngay lập tức và tua mượt mà đến mọi giây của video.
@@ -102,10 +108,12 @@ Hệ thống tự động theo dõi và ghi hình livestream TikTok chuẩn HD H
 Google Drive
 └── tiktok-record/
     ├── active_recordings.json          <- Trạng thái phiên ghi hình đang hoạt động (TTL 180s)
+    ├── streamers.json                  <- Bản sao danh sách streamer (fallback khi Supabase lỗi)
     ├── islizanx/
-    │   ├── staging/                    <- Thư mục tạm Staging Queue (tự dọn dẹp khi xong)
     │   ├── islizanx_2026-09-27_10-00-00.mp4
-    │   └── islizanx_2026-09-27_10-00-00.jpg
+    │   ├── islizanx_2026-09-27_10-00-00.jpg
+    │   ├── islizanx_2026-09-27_11-00-00_part2.mp4   <- Part 2 khi live > 1 giờ
+    │   └── _staging/                   <- Chỉ tồn tại nếu module staging_queue.py được dùng
     └── triuthnga770/
         ├── triuthnga770_2026-09-27_15-02-14.mp4
         └── triuthnga770_2026-09-27_15-02-14.jpg
@@ -158,14 +166,22 @@ Nếu cần chạy thử nghiệm hoặc gỡ lỗi cục bộ trên máy tính 
    ```cmd
    pip install -r requirements.txt
    ```
-2. Chạy bộ kiểm thử 78 test cases:
+2. Kiểm tra cú pháp toàn bộ module (không cần credentials):
    ```cmd
-   python test_audit_suite.py
+   python -m py_compile cloud_daemon.py recorder_core.py supabase_sync.py api_server.py auto_h264.py
    ```
-3. Chạy daemon ghi hình thử nghiệm với GPU:
+3. Kiểm tra hệ thống đám mây có đang chạy thật không (đọc trực tiếp Supabase):
+   ```cmd
+   python check_status.py
+   ```
+   → In ra tổng streamer, số đang live/ghi hình, tuổi heartbeat của từng luồng và cảnh báo ghost recording.
+4. Chạy daemon ghi hình thử nghiệm với GPU:
    ```cmd
    run_cloud_daemon.bat
    ```
+
+> [!WARNING]
+> Repo **không còn test suite tự động**. Các file `test_audit_suite.py`, `test_challenger_concurrency.py`, `test_adversarial_deletion.py` và workflow `ci-tests.yml` đã bị xóa ở commit `52418b8`. Mọi con số "78/78" hay "104/104 test" trong tài liệu cũ là số liệu lịch sử và **không thể tái lập**. Dùng `py_compile` + `check_status.py` để kiểm tra sau khi sửa code.
 
 ---
 
@@ -181,9 +197,23 @@ Website Kuru Hub (`web-truyen`) được thiết kế theo kiến trúc **Cloud-
   - Cho phép xem streamer, kiểm tra live status, thêm/xóa streamer bình thường.
 
 ### 2. Quản lý Streamer & Xóa Dữ Liệu Sạch Sẽ (Cả DB lẫn Storage Covers)
-* **Thêm streamer mới:** Lưu vào Supabase bảng `tiktok_streamers`. Runner đám mây trên GitHub Actions tự động quét và thu sau tối đa 20 giây.
+* **Thêm streamer mới:** Lưu vào Supabase bảng `tiktok_streamers`. Runner đám mây phát hiện qua **Fast-Poll 5 giây** và kiểm tra live **đầu tiên** trong hàng đợi → bật ghi hình trong **~5–8 giây** nếu runner đang chạy.
 * **Xóa streamer:** Xóa khỏi `tiktok_streamers`, `tiktok_recordings`, đồng thời **xóa sạch toàn bộ ảnh thumbnail** trong bucket `covers` trên Supabase Storage (`record-thumbnails/{user}/`).
 * **Xóa video đã ghi:** Xóa hàng tương ứng trong `tiktok_recordings`, xóa video trên Google Drive và **xóa sạch file ảnh thumbnail `.jpg`** tương ứng trong bucket `covers`.
+
+### 2b. Bảng Độ Trễ Thực Tế Khi Thêm Streamer Đang Live
+
+| Tình huống | Thời gian tới khi có `is_recording = true` |
+| :--- | :--- |
+| Runner đang chạy + còn slot (< 10) | **~5–8 giây** (Fast-Poll 5s + kiểm tra live + khởi động luồng) |
+| Runner đang chạy nhưng streamer vừa fail phiên trước | **~5–8 giây** (backoff của username mới được reset tự động) |
+| Runner đang ở pha DRAIN (sau 170 phút) | ~5–10 phút (chờ runner kế tiếp khởi động) |
+| Không có runner + Vercel có `GITHUB_PAT`/`WORKFLOW_PAT` | ~1–3 phút (boot runner + cài ffmpeg/deps) |
+| Không có runner + **không** có PAT | tới **50 phút** (chờ cron `*/50 * * * *`) |
+| Đã đủ 10 streamer đang ghi | Không ghi; chỉ cập nhật `status='live'` để web hiển thị 🟢 LIVE |
+
+> [!NOTE]
+> Mỗi lần thêm streamer, web gọi Dispatch API. Do workflow dùng `concurrency: recorder-runner` với `cancel-in-progress: false`, nếu đang có run thì run mới sẽ **xếp hàng** (không hủy run đang ghi) — đây là hành vi cố ý để không làm mất video đang ghi.
 
 ### 3. Kích hoạt Ghi hình Tức thì qua GitHub Actions Dispatch API
 Gửi request từ Next.js / Node.js backend khi cần ép runner khởi chạy ngay lập tức:
@@ -220,22 +250,23 @@ Mỗi bản ghi trả về mã `drive_file_id`. URL phát video chuẩn Google E
 
 | Tên file | Chức năng chính |
 | :--- | :--- |
-| `cloud_daemon.py` | Tiến trình điều phối chính, đồng bộ streamer từ Supabase, quản lý đa luồng tối đa 10 streamer |
+| `cloud_daemon.py` | Tiến trình điều phối chính, đồng bộ streamer từ Supabase (15s + Fast-Poll 5s), quản lý đa luồng tối đa 10 streamer |
 | `recorder_core.py` | Lõi trích xuất luồng TikTok (ưu tiên HLS H.264), Live-End Watchdog, FFmpeg recorder |
 | `auto_h264.py` | Bộ xử lý bitstream ISO/IEC 14496-15, sửa lỗi NAL Unit, trích xuất thumbnail chính giữa |
-| `staging_queue.py` | Đóng gói phân đoạn video an toàn chống mất mát dữ liệu, ghép nối file hoàn chỉnh |
+| `staging_queue.py` | Module đệm phân đoạn lên Drive — **hiện chưa nối vào luồng ghi chính**, chỉ dùng cho `check_and_flush_idle_queues()` |
 | `supabase_sync.py` | Khách REST client đồng bộ dữ liệu hai chiều với Supabase Database & Storage |
 | `repair_cloud_videos_engine.py` | Động cơ quét và tự lành video trên Google Drive, bù thumbnail thiếu |
 | `gdrive_manager.py` | Quản lý Google Drive API v3: Upload đa phân đoạn, phân quyền CDN, dọn rác |
 | `gdrive_auth.py` | Bộ cấp phép và tự động làm mới OAuth2 Refresh Token Google Drive |
 | `api_server.py` | Máy chủ REST API FastAPI cung cấp các endpoint bổ trợ và kiểm thử |
+| `check_status.py` | Kiểm tra nhanh trạng thái thật từ Supabase: live/recording, tuổi heartbeat, ghost recording |
+| `cleanup_ghost_recordings.py` | Dọn cờ `is_recording`/`is_live` sai lệch so với thực tế TikTok |
 | `run_cloud_daemon.bat` | Script chạy ngầm cục bộ với GPU NVIDIA NVENC, tự khởi động lại sau 5s |
-| `test_audit_suite.py` | Bộ kiểm thử tự động toàn diện 78 bài test (Đạt 78/78 OK) |
-| `test_challenger_concurrency.py`| Bộ kiểm thử đối kháng đa luồng 26 bài test (Đạt 26/26 OK) |
 | `.github/workflows/recorder.yml` | Workflow GitHub Actions chạy liên tục 24/7 (Relay + Cron 50 phút) |
 | `.github/workflows/repair-watchdog.yml` | Workflow GitHub Actions tự phục hồi chạy định kỳ mỗi 6 giờ |
 
-Tổng cộng **104/104 bài test**: `python -B -m unittest test_audit_suite test_challenger_concurrency`
+> [!NOTE]
+> Repo không còn test suite tự động (`test_*.py` + `ci-tests.yml` đã xóa ở commit `52418b8`). Kiểm tra sau khi sửa code bằng `python -m py_compile ...` và `python check_status.py`.
 
 ---
 

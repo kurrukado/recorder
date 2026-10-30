@@ -880,6 +880,20 @@ def add_user(req: AddUserRequest, bg_tasks: BackgroundTasks):
                 LIVE_CACHE.pop(usr, None)
             live_details = get_user_live_details_cached(usr, fresh=True)
             if live_details.get("is_live"):
+                # Chống ghi trùng với Cloud Runner (GitHub Actions): nếu Drive còn heartbeat
+                # < 180s cho user này thì cloud đã ghi rồi, KHÔNG mở thêm luồng local
+                # (nếu không sẽ có 2 bản ghi song song + 2 video trùng trên Drive).
+                try:
+                    drive_details = gdrive_manager.load_active_recordings_from_drive(as_details=True) or []
+                    now_ts = int(time.time())
+                    for it in drive_details:
+                        u_name = it.get("username") if isinstance(it, dict) else str(it)
+                        if u_name and u_name.strip().replace("@", "").lower() == usr:
+                            up_at = it.get("updated_at", 0) if isinstance(it, dict) else 0
+                            if now_ts - up_at < 180:
+                                return
+                except Exception:
+                    pass
                 has_ffmpeg = bool(shutil.which("ffmpeg") or (FFMPEG_PATH and os.path.exists(FFMPEG_PATH)))
                 if has_ffmpeg:
                     with RECORDING_LOCK:

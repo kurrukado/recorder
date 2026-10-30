@@ -83,9 +83,15 @@ def load_monitored_users():
             if supa_ok:
                 # Milestone 1: Khi supa_ok == True, Supabase là single source of truth (kể cả khi rỗng supa_users = [])
                 cleaned = supa_users
+                previous = list(_CACHED_DRIVE_USERS) if _CACHED_DRIVE_USERS is not None else []
                 if _CACHED_DRIVE_USERS != cleaned:
                     log(f"[*] Cập nhật danh sách từ Supabase ({len(cleaned)} streamers): {cleaned}")
                 _CACHED_DRIVE_USERS = cleaned
+                # Streamer vừa được thêm phải được kiểm tra live NGAY. Nếu username này từng
+                # thất bại trong phiên trước, backoff (tới 8 phút) hoặc _SESSION_SKIP_USERS sẽ
+                # hoãn việc ghi hình -> xóa trạng thái cũ khi phát hiện username mới.
+                if previous:
+                    _reset_user_backoff([u for u in cleaned if u not in set(previous)])
 
                 # Nếu Drive streamers.json chứa streamer không có trong Supabase (hoặc có streamer mới trên Supabase),
                 # đồng bộ/prune streamers.json trên Google Drive (chỉ khi load từ Drive thành công)
@@ -200,6 +206,49 @@ _USER_START_COOLDOWN = {}       # {user: last_start_ts}
 _USER_FAILURE_STREAK = {}       # {user: số phiên liên tiếp không thu được giây nào}
 _SESSION_SKIP_USERS = set()     # {user} tạm bỏ qua trong phiên daemon hiện tại
 _WORKER_OUTCOME = {}            # {user: {"produced": bool, "stopped": bool}}
+
+# Nhịp Fast-Poll: trong lúc chờ giữa 2 vòng quét, daemon vẫn hỏi Supabase mỗi 5s
+# để phát hiện streamer VỪA được thêm. Nhờ đó "add streamer lúc đang live" được
+# kiểm tra + khởi động ghi hình trong ~5-8s thay vì chờ hết vòng quét ~20-25s.
+FAST_POLL_SECONDS = 5
+
+
+def _reset_user_backoff(users):
+    """Xóa backoff / skip / streak cũ cho danh sách streamer vừa được thêm."""
+    for u in users or []:
+        _USER_START_COOLDOWN.pop(u, None)
+        _USER_FAILURE_STREAK.pop(u, None)
+        _SESSION_SKIP_USERS.discard(u)
+
+
+def _fast_poll_new_streamers():
+    """
+    Hỏi nhẹ Supabase (1 request) để bắt streamer mới trong lúc daemon đang sleep.
+    Trả về True nếu có username mới -> caller thoát sleep sớm để kiểm tra live ngay.
+
+    Chỉ xử lý THÊM streamer, không prune: việc prune + đồng bộ streamers.json
+    vẫn do load_monitored_users() (TTL 15s) đảm nhiệm để tránh ghi Drive liên tục.
+    """
+    global _CACHED_DRIVE_USERS
+    try:
+        s = supabase_sync.fetch_streamers_from_supabase()
+    except Exception:
+        return False
+    if not isinstance(s, list):
+        return False
+    fresh = [u.strip().replace("@", "").lower() for u in s if u and u.strip()]
+    with _CONFIG_USERS_LOCK:
+        current = _CACHED_DRIVE_USERS
+        if current is None:
+            return False
+        current_set = set(current)
+        added = [u for u in fresh if u not in current_set]
+        if not added:
+            return False
+        _CACHED_DRIVE_USERS = list(dict.fromkeys(added + current))
+    _reset_user_backoff(added)
+    log(f"⚡ [Fast-Poll] Phát hiện {len(added)} streamer mới trên Supabase: {added}. Kiểm tra live ngay...")
+    return True
 
 
 def _fetch_stream_candidates_for_worker(room_id, user=None, session=None):
@@ -1129,10 +1178,14 @@ def run_daemon(max_minutes=210, interval=25, auto_discover=True):
             except Exception:
                 pass
 
-        # Ưu tiên các streamer mới nhất (ở cuối danh sách) lên đầu hàng đợi kiểm tra.
+        # Ưu tiên streamer MỚI NHẤT lên đầu hàng đợi kiểm tra.
+        # fetch_streamers_from_supabase() trả về order=id.desc (mới nhất trước) và
+        # _fast_poll_new_streamers() chèn streamer vừa thêm vào đầu list -> KHÔNG đảo
+        # lại danh sách ở đây, nếu không streamer vừa add sẽ bị kiểm tra CUỐI cùng
+        # (chậm thêm vài giây với ~100 streamer).
         # Bỏ qua các streamer đã bị tạm khóa trong phiên này (_SESSION_SKIP_USERS).
         users_to_check = [
-            u for u in reversed(users)
+            u for u in users
             if u not in active_set and u not in drive_busy_users and u not in _SESSION_SKIP_USERS
         ]
 
@@ -1309,9 +1362,21 @@ def run_daemon(max_minutes=210, interval=25, auto_discover=True):
                 t.start()
                 time.sleep(0.5)
 
-        # Smart Jitter Delay để tránh bị TikTok chặn tần suất
+        # Smart Jitter Delay để tránh bị TikTok chặn tần suất.
+        # Ngủ theo từng lát FAST_POLL_SECONDS: nếu có streamer vừa được thêm trên
+        # Supabase thì thoát sleep ngay để kiểm tra live + bật ghi hình, thay vì
+        # chờ hết cả vòng quét (~20s).
         jitter = random.uniform(-2.0, 3.0)
-        time.sleep(max(10, interval + jitter))
+        sleep_until = time.time() + max(10, interval + jitter)
+        while True:
+            remaining = sleep_until - time.time()
+            if remaining <= 0:
+                break
+            time.sleep(min(FAST_POLL_SECONDS, remaining))
+            if draining:
+                continue
+            if _fast_poll_new_streamers():
+                break
         gc.collect()
 
     # Chờ tất cả luồng ghi hình hoàn tất đóng gói và upload lên Google Drive
