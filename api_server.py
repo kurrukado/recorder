@@ -404,8 +404,20 @@ class RecordRequest(BaseModel):
 
 @app.get("/health")
 @app.get("/api/health")
-@app.get("/api/status")
 def health_check():
+    # Render requires a response within 5s. Cloud status has its own endpoint.
+    with RECORDING_LOCK:
+        active = list(ACTIVE_RECORDING_TASKS)
+    return {
+        "status": "online",
+        "time": datetime.now().isoformat(),
+        "active_recordings": active,
+        "active_count": len(active),
+    }
+
+
+@app.get("/api/status")
+def status_check():
     active = set()
     try:
         drive_act = gdrive_manager.load_active_recordings_from_drive() or []

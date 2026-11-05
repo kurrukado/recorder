@@ -14,6 +14,30 @@ import auto_h264
 
 
 class RecordingControlsTests(unittest.TestCase):
+    def test_render_health_never_waits_for_cloud_dependencies(self):
+        import api_server
+        from fastapi.testclient import TestClient
+        with patch.object(api_server.gdrive_manager, "load_active_recordings_from_drive") as drive, \
+             patch.object(api_server.supabase_sync, "get_active_recordings_from_supabase") as database, \
+             patch.dict(api_server.ACTIVE_RECORDING_TASKS, {"local_test": {}}, clear=True):
+            client = TestClient(api_server.app)
+            for path in ("/health", "/api/health"):
+                response = client.get(path)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json()["active_recordings"], ["local_test"])
+            drive.assert_not_called()
+            database.assert_not_called()
+
+    def test_status_still_includes_cloud_recorders(self):
+        import api_server
+        from fastapi.testclient import TestClient
+        with patch.object(api_server.gdrive_manager, "load_active_recordings_from_drive", return_value=["drive_test"]), \
+             patch.object(api_server.supabase_sync, "get_active_recordings_from_supabase", return_value=["db_test"]), \
+             patch.dict(api_server.ACTIVE_RECORDING_TASKS, {}, clear=True):
+            response = TestClient(api_server.app).get("/api/status")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(set(response.json()["active_recordings"]), {"drive_test", "db_test"})
+
     def test_preferences_keep_disabled_streamers(self):
         response = MagicMock(status_code=200)
         response.json.return_value = [
