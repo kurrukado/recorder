@@ -48,6 +48,27 @@ _CONFIG_USERS_LOCK = threading.RLock()
 
 _LAST_DRIVE_CHECK = 0
 _CACHED_DRIVE_USERS = None
+_PAUSED_USERS = set()
+_RECORDING_PREFERENCES_READY = False
+
+
+def apply_recording_preferences(preferences):
+    """Pause is a soft stop, never the destructive streamer-deletion path."""
+    global _PAUSED_USERS, _RECORDING_PREFERENCES_READY
+    if preferences is None:
+        return
+    paused = {u for u, enabled in preferences.items() if not enabled}
+    for u in _PAUSED_USERS - paused:
+        _USER_START_COOLDOWN.pop(u, None)
+        _USER_FAILURE_STREAK.pop(u, None)
+        _SESSION_SKIP_USERS.discard(u)
+    _PAUSED_USERS = paused
+    _RECORDING_PREFERENCES_READY = True
+    with RECORDERS_LOCK:
+        for u in paused:
+            info = ACTIVE_RECORDERS.get(u)
+            if info and info.get("stop_event"):
+                info["stop_event"].set()
 
 def load_monitored_users():
     global _LAST_DRIVE_CHECK, _CACHED_DRIVE_USERS
@@ -57,6 +78,7 @@ def load_monitored_users():
         # Kiểm tra danh sách streamer mới từ Google Drive & Supabase sau mỗi 15 giây
         if now - _LAST_DRIVE_CHECK > 15:
             _LAST_DRIVE_CHECK = now
+            apply_recording_preferences(supabase_sync.fetch_recording_preferences())
             drive_users = []
             d = None
             try:
@@ -69,7 +91,6 @@ def load_monitored_users():
             supa_users = []
             supa_ok = False
             try:
-                import supabase_sync
                 s = supabase_sync.fetch_streamers_from_supabase()
                 if s is not None and isinstance(s, list):
                     supa_users = [u.strip().replace("@", "").lower() for u in s if u.strip()]
@@ -1186,7 +1207,8 @@ def run_daemon(max_minutes=210, interval=25, auto_discover=True):
         # Bỏ qua các streamer đã bị tạm khóa trong phiên này (_SESSION_SKIP_USERS).
         users_to_check = [
             u for u in users
-            if u not in active_set and u not in drive_busy_users and u not in _SESSION_SKIP_USERS
+            if _RECORDING_PREFERENCES_READY and u not in _PAUSED_USERS
+            and u not in active_set and u not in drive_busy_users and u not in _SESSION_SKIP_USERS
         ]
 
         if (not draining) and users_to_check:
@@ -1336,7 +1358,8 @@ def run_daemon(max_minutes=210, interval=25, auto_discover=True):
                     daemon=True
                 )
                 with RECORDERS_LOCK:
-                    if user in ACTIVE_RECORDERS or len(ACTIVE_RECORDERS) >= MAX_CONCURRENT_RECORDERS:
+                    if (not _RECORDING_PREFERENCES_READY or user in _PAUSED_USERS
+                            or user in ACTIVE_RECORDERS or len(ACTIVE_RECORDERS) >= MAX_CONCURRENT_RECORDERS):
                         continue
                     ACTIVE_RECORDERS[user] = {
                         "thread": t,

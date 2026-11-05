@@ -51,6 +51,25 @@ def get_supabase_headers(content_type: str = "application/json"):
         "Content-Type": content_type
     }
 
+def fetch_recording_preferences() -> Optional[dict]:
+    """None means unavailable; never confuse a failed read with everyone enabled."""
+    if not SUPABASE_KEY:
+        return None
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/tiktok_streamers?select=username,recording_enabled"
+        with requests.get(url, headers=get_supabase_headers(), timeout=10) as res:
+            if res.status_code == 200 and isinstance(res.json(), list):
+                return {
+                    d["username"].strip().replace("@", "").lower(): d["recording_enabled"]
+                    for d in res.json()
+                    if d.get("username") and isinstance(d.get("recording_enabled"), bool)
+                }
+            print(f"[SUPABASE-SYNC] Không đọc được cài đặt ghi hình (HTTP {res.status_code}); kiểm tra migration recording_enabled.")
+    except requests.RequestException as error:
+        print(f"[SUPABASE-SYNC] Lỗi đọc cài đặt ghi hình: {type(error).__name__}")
+    return None
+
+
 def fetch_streamers_from_supabase() -> Optional[list]:
     """Đọc danh sách streamer đang theo dõi trực tiếp từ table 'tiktok_streamers'. Trả về list nếu thành công, None nếu lỗi/offline."""
     if not SUPABASE_KEY:
@@ -87,6 +106,7 @@ def fetch_streamers_details_from_supabase() -> Optional[list]:
                             result.append({
                                 "id": d.get("id"),
                                 "username": u,
+                                "recording_enabled": d.get("recording_enabled", True),
                                 "is_live": is_liv,
                                 "is_recording": is_rec,
                                 "room_id": d.get("room_id") or None,

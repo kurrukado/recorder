@@ -151,6 +151,49 @@ def convert_audio_only_to_video(filepath: str) -> Optional[str]:
             except Exception: pass
     return None
 
+def recover_incomplete_fragment(filepath):
+    """Keep complete fMP4 fragments when a hard stop interrupted the last box."""
+    try:
+        source = open(filepath, "rb")
+    except OSError:
+        return
+    with source:
+        total = os.fstat(source.fileno()).st_size
+        pos = complete_end = 0
+        fragmented = False
+        while pos + 8 <= total:
+            source.seek(pos)
+            header = source.read(16)
+            size = int.from_bytes(header[:4], "big")
+            kind = header[4:8]
+            if size == 1:
+                size = int.from_bytes(header[8:16], "big")
+            if size == 0:
+                size = total - pos
+            if size < 8 or pos + size > total:
+                break
+            if kind == b"moof":
+                fragmented = True
+            if fragmented and kind == b"mdat":
+                complete_end = pos + size
+            pos += size
+        if not fragmented or not complete_end or pos == total:
+            return
+        # Work on a separate file: an interrupted recovery never damages the source.
+        recovered = filepath + ".recovered.tmp.mp4"
+        source.seek(0)
+        remaining = complete_end
+        with open(recovered, "wb") as target:
+            while remaining:
+                block = source.read(min(1024 * 1024, remaining))
+                if not block:
+                    raise OSError("Incomplete read while recovering MP4")
+                target.write(block)
+                remaining -= len(block)
+    os.replace(recovered, filepath)
+    print(f"[auto_h264] Đã giữ các fragment hoàn chỉnh, bỏ đuôi ghi dở: {os.path.basename(filepath)}")
+
+
 def validate_playable_video(filepath, min_duration=5.0, min_size_bytes=250000):
     """
     Kiểm tra tính toàn vẹn và khả năng phát thực tế của file video:
@@ -163,6 +206,7 @@ def validate_playable_video(filepath, min_duration=5.0, min_size_bytes=250000):
     if not filepath or not os.path.exists(filepath):
         return False, "File không tồn tại", 0.0
 
+    recover_incomplete_fragment(filepath)
     size = os.path.getsize(filepath)
     if size < min_size_bytes:
         return False, f"Dung lượng quá nhỏ ({size} bytes < {min_size_bytes} bytes)", 0.0
@@ -375,6 +419,19 @@ def has_faststart(filepath):
                 box_size = int.from_bytes(header[pos:pos+4], "big")
                 box_type = header[pos+4:pos+8]
                 if box_type == b"moov":
+                    # Fragmented capture has an empty sample table plus mvex.
+                    # Force a final +faststart remux before publishing/seeking.
+                    child = pos + 8
+                    end = pos + box_size
+                    if end > len(header):
+                        return False
+                    while child + 8 <= end:
+                        size = int.from_bytes(header[child:child+4], "big")
+                        if header[child+4:child+8] == b"mvex":
+                            return False
+                        if size < 8:
+                            return False
+                        child += size
                     return True
                 if box_type == b"mdat":
                     return False
@@ -764,6 +821,7 @@ def ensure_h264(filepath):
     if not os.path.exists(filepath):
         return filepath
 
+    recover_incomplete_fragment(filepath)
     filename = os.path.basename(filepath)
     codec = get_video_codec(filepath)
     audio_codec = get_audio_codec(filepath)

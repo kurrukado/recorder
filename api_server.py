@@ -741,6 +741,7 @@ def get_users(check_live: bool = True, fresh: bool = False):
                 "id": sd.get("id"),
                 "created_at": sd.get("created_at"),
                 "username": u,
+                "recording_enabled": sd.get("recording_enabled", True),
                 "nickname": nickname,
                 "avatar_thumb": avatar_thumb,
                 "is_live": is_live,
@@ -867,6 +868,9 @@ def add_user(req: AddUserRequest, bg_tasks: BackgroundTasks):
 
     # Tác vụ nặng (lưu Drive, tạo thư mục Drive, check live và kích hoạt quay) chạy nền để phản hồi HTTP ngay tức thì (~50ms)
     def _bg_post_add_tasks(usr, all_u):
+        preferences = supabase_sync.fetch_recording_preferences()
+        if preferences is None or preferences.get(usr) is False:
+            return
         try:
             gdrive_manager.save_streamers_to_drive(all_u)
         except Exception:
@@ -1967,6 +1971,11 @@ def bg_record_worker(user: str, duration: Optional[int] = None, stop_event: Opti
 def start_record(req: RecordRequest, bg_tasks: BackgroundTasks):
     user = req.username.strip().replace("@", "").lower()
     if not user: raise HTTPException(status_code=400, detail="Tên tài khoản không hợp lệ")
+    preferences = supabase_sync.fetch_recording_preferences()
+    if preferences is None:
+        raise HTTPException(status_code=503, detail="Không đọc được cài đặt ghi hình")
+    if preferences.get(user) is False:
+        raise HTTPException(status_code=409, detail="Streamer đang tắt ghi hình tự động")
     
     # Đảm bảo streamer có trong danh sách theo dõi
     with config_transaction():

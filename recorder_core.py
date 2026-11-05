@@ -1070,6 +1070,10 @@ def record_stream_ffmpeg(stream_url, output_filename=None, target_user: Optional
         "-max_interleave_delta", "0",
         "-avoid_negative_ts", "make_zero",
         "-flush_packets", "1",
+        # Commit a moov header immediately and bounded fragments while capturing.
+        # A hard runner kill can then lose the last fragment instead of the entire MP4.
+        "-movflags", "+frag_keyframe+empty_moov+default_base_moof",
+        "-frag_duration", "2000000",
     ])
     if duration:
         cmd.extend(["-t", str(duration)])
@@ -1131,6 +1135,16 @@ def record_stream_ffmpeg(stream_url, output_filename=None, target_user: Optional
             # Gia hạn heartbeat 30s cho Google Drive và Supabase để web-truyen luôn nhận tín hiệu đang ghi hình
             if target_user and (now - last_heartbeat_time) >= 30:
                 last_heartbeat_time = now
+                try:
+                    import supabase_sync
+                    preferences = supabase_sync.fetch_recording_preferences()
+                    if preferences is not None and preferences.get(target_user) is False:
+                        if stop_event:
+                            stop_event.set()
+                        _safe_stop_ffmpeg(proc, timeout=8)
+                        break
+                except Exception as preference_error:
+                    print(f"[!] Không đọc được cài đặt ghi hình: {type(preference_error).__name__}")
                 try:
                     import gdrive_manager
                     gdrive_manager.set_user_recording_status_drive(target_user, True)
