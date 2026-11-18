@@ -1,0 +1,19 @@
+[Unit]
+Description=Kuru Record shared HLS live previews
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=kuru-record
+Group=kuru-record
+WorkingDirectory=/opt/kuru-record
+EnvironmentFile=/etc/kuru-record/preview.env
+ExecStart=/opt/kuru-record/.venv/bin/python -m uvicorn record_live_preview:app --host 127.0.0.1 --port 8011 --no-access-log
+Restart=on-failure
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=30
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

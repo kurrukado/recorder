@@ -8,6 +8,7 @@ import subprocess
 import random
 import threading
 import atexit
+import tempfile
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Tuple
 from curl_cffi import requests
@@ -123,7 +124,16 @@ def generate_guest_session(proxy: Optional[str] = None) -> requests.Session:
             pass
         raise
 
-def check_live_details(user: str, cookies: Optional[dict] = None, proxy: Optional[str] = None) -> dict:
+def _request_timeout(deadline, original_timeout):
+    if deadline is None:
+        return original_timeout
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("TikTok request budget exhausted")
+    return min(original_timeout, remaining)
+
+
+def check_live_details(user: str, cookies: Optional[dict] = None, proxy: Optional[str] = None, *, max_wait=None) -> dict:
     """
     Trích xuất thông tin chi tiết phiên live:
     - is_live: bool
@@ -134,9 +144,11 @@ def check_live_details(user: str, cookies: Optional[dict] = None, proxy: Optiona
     - preview_duration: Optional[int]
     Trích xuất từ SIGI_STATE (liveSubOnly, paidEvent) và Webcast API (sub_only, live_sub_only, paid_event).
     """
+    deadline = time.monotonic() + max_wait if max_wait is not None else None
     user = user.strip().replace("@", "").lower()
     details = {
         "is_live": False,
+        "probe_state": None,  # Only explicit TikTok signals can confirm offline.
         "room_id": None,
         "is_sub_only": False,
         "is_preview": False,
@@ -174,7 +186,7 @@ def check_live_details(user: str, cookies: Optional[dict] = None, proxy: Optiona
             try:
                 req_kwargs = {
                     "params": api_params,
-                    "timeout": 6,
+                    "timeout": _request_timeout(deadline, 6),
                     "headers": api_headers,
                 }
                 if imp:
@@ -198,6 +210,7 @@ def check_live_details(user: str, cookies: Optional[dict] = None, proxy: Optiona
                                 details["is_account_deleted"] = True
                             else:
                                 details["is_account_deleted"] = False
+                            details["probe_state"] = "offline"
                             details["is_live"] = False
                             details["room_id"] = None
                             return details
@@ -223,12 +236,18 @@ def check_live_details(user: str, cookies: Optional[dict] = None, proxy: Optiona
                             details["is_preview"] = True
 
                         if status == 2 and room_id:
+                            details["probe_state"] = "live"
                             details["is_live"] = True
                             details["room_id"] = str(room_id)
                             return details
                         elif status is not None and status != 2:
+                            if status in (0, 1, 3, 4):
+                                details["probe_state"] = "offline"
                             details["is_live"] = False
                             details["room_id"] = None
+                            return details
+                        elif max_wait is not None and user_data.get("roomId") in ("0", 0) and str(user_data.get("uniqueId", "")).lower() == user:
+                            details["probe_state"] = "offline"
                             return details
             except Exception:
                 continue
@@ -249,7 +268,7 @@ def check_live_details(user: str, cookies: Optional[dict] = None, proxy: Optiona
             cookie_str = "; ".join(f"{k}={v}" for k, v in cookies.items()) if cookies else "tt-target-idc=useast1a"
             u_headers["Cookie"] = cookie_str
             u_req = urllib.request.Request(u_url, headers=u_headers)
-            with urllib.request.urlopen(u_req, timeout=6) as u_res:
+            with urllib.request.urlopen(u_req, timeout=_request_timeout(deadline, 6)) as u_res:
                 if u_res.status == 200:
                     u_json = json.loads(u_res.read().decode("utf-8", errors="replace"))
                     if isinstance(u_json, dict):
@@ -262,6 +281,7 @@ def check_live_details(user: str, cookies: Optional[dict] = None, proxy: Optiona
                                 details["is_account_deleted"] = True
                             else:
                                 details["is_account_deleted"] = False
+                            details["probe_state"] = "offline"
                             details["is_live"] = False
                             details["room_id"] = None
                             return details
@@ -281,10 +301,13 @@ def check_live_details(user: str, cookies: Optional[dict] = None, proxy: Optiona
                             details["is_sub_only"] = True
                             details["is_preview"] = True
                         if status == 2 and room_id:
+                            details["probe_state"] = "live"
                             details["is_live"] = True
                             details["room_id"] = str(room_id)
                             return details
                         elif status is not None and status != 2:
+                            if status in (0, 1, 3, 4):
+                                details["probe_state"] = "offline"
                             details["is_live"] = False
                             details["room_id"] = None
                             return details
@@ -310,7 +333,7 @@ def check_live_details(user: str, cookies: Optional[dict] = None, proxy: Optiona
             "Referer": "https://www.tiktok.com/",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         }
-        res = session.get(url, headers=headers, timeout=7, allow_redirects=True)
+        res = session.get(url, headers=headers, timeout=_request_timeout(deadline, 7), allow_redirects=True)
         # Phát hiện tự động streamer đổi username (@) qua redirect URL
         final_url = str(getattr(res, "url", url))
         m_red = re.search(r'tiktok\.com/@([a-zA-Z0-9_\.]+)', final_url)
@@ -322,6 +345,7 @@ def check_live_details(user: str, cookies: Optional[dict] = None, proxy: Optiona
         if res.status_code == 404 or "/404" in final_url:
             if "deleted_" in user:
                 details["is_account_deleted"] = True
+            details["probe_state"] = "offline"
             details["is_live"] = False
             details["room_id"] = None
             return details
@@ -335,6 +359,7 @@ def check_live_details(user: str, cookies: Optional[dict] = None, proxy: Optiona
                     or '"user_not_found"' in res_text
                 ):
                     details["is_account_deleted"] = True
+                    details["probe_state"] = "offline"
                     details["is_live"] = False
                     details["room_id"] = None
                     return details
@@ -380,9 +405,11 @@ def check_live_details(user: str, cookies: Optional[dict] = None, proxy: Optiona
                                     if r_match:
                                         room_id = r_match.group(1)
                                 if room_id:
+                                    details["probe_state"] = "live"
                                     details["is_live"] = True
                                     details["room_id"] = str(room_id)
                             elif status == 4:
+                                details["probe_state"] = "offline"
                                 details["is_live"] = False
                                 details["room_id"] = None
                                 return details
@@ -408,6 +435,7 @@ def check_live_details(user: str, cookies: Optional[dict] = None, proxy: Optiona
                 # Kiểm tra text đặc trưng nếu streamer đã tắt live
                 m_stat = re.search(r'"uniqueId":"' + re.escape(user) + r'"[^\}]*?"status":\s*(\d+)', res_text, re.DOTALL)
                 if m_stat and int(m_stat.group(1)) == 4:
+                    details["probe_state"] = "offline"
                     details["is_live"] = False
                     details["room_id"] = None
                     return details
@@ -415,6 +443,7 @@ def check_live_details(user: str, cookies: Optional[dict] = None, proxy: Optiona
                 if not details["is_live"]:
                     r_match = re.search(r'"roomId"[:\"]+(\d{15,25})', res_text)
                     if r_match and re.search(r'"uniqueId":"' + re.escape(user) + r'"[^\}]*?"status":\s*2', res_text, re.DOTALL):
+                        details["probe_state"] = "live"
                         details["is_live"] = True
                         details["room_id"] = r_match.group(1)
 
@@ -428,7 +457,7 @@ def check_live_details(user: str, cookies: Optional[dict] = None, proxy: Optiona
                     "Accept": "*/*",
                     "Origin": "https://www.tiktok.com",
                 }
-                w_res = session.get(w_url, headers=w_headers, timeout=4)
+                w_res = session.get(w_url, headers=w_headers, timeout=_request_timeout(deadline, 4))
                 if w_res.status_code == 200:
                     try:
                         w_json = w_res.json()
@@ -698,11 +727,12 @@ def parse_sdk_stream_data(sdk_data_str: str) -> list:
         pass
     return candidates
 
-def get_stream_urls(room_id, user, cookies=None, session=None, proxy=None):
+def get_stream_urls(room_id, user, cookies=None, session=None, proxy=None, *, max_wait=None):
     """
     Extract candidate stream URLs (FLV or HLS / m3u8).
     Supports 18+ restricted streams using authenticated sessionid cookies or custom guest session.
     """
+    deadline = time.monotonic() + max_wait if max_wait is not None else None
     if cookies is None:
         cookies = load_cookies()
     if isinstance(cookies, dict):
@@ -732,6 +762,7 @@ def get_stream_urls(room_id, user, cookies=None, session=None, proxy=None):
                 api_res = None
                 try:
                     kwargs = dict(req_kwargs)
+                    kwargs["timeout"] = _request_timeout(deadline, 7)
                     if imp:
                         kwargs["impersonate"] = imp
                     api_res = requests.get(api_url, **kwargs)
@@ -763,7 +794,7 @@ def get_stream_urls(room_id, user, cookies=None, session=None, proxy=None):
                 cookie_str = "; ".join(f"{k}={v}" for k, v in cookies.items()) if cookies else "tt-target-idc=useast1a"
                 u_headers["Cookie"] = cookie_str
                 u_req = urllib.request.Request(u_url, headers=u_headers)
-                with urllib.request.urlopen(u_req, timeout=7) as u_res:
+                with urllib.request.urlopen(u_req, timeout=_request_timeout(deadline, 7)) as u_res:
                     if u_res.status == 200:
                         u_json = json.loads(u_res.read().decode("utf-8", errors="replace"))
                         d = u_json.get("data", {}).get("liveRoom", {})
@@ -809,7 +840,7 @@ def get_stream_urls(room_id, user, cookies=None, session=None, proxy=None):
                     "Referer": "https://www.tiktok.com/",
                     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 }
-                page_res = session.get(live_page_url, headers=page_headers, timeout=15)
+                page_res = session.get(live_page_url, headers=page_headers, timeout=_request_timeout(deadline, 15))
                 sc = getattr(page_res, "status_code", 200)
                 if sc == 200 or not isinstance(sc, (int, float)):
                     raw_text = page_res.text
@@ -881,7 +912,7 @@ def get_stream_urls(room_id, user, cookies=None, session=None, proxy=None):
             }
             res = None
             try:
-                res = session.get(url, headers=headers, timeout=10)
+                res = session.get(url, headers=headers, timeout=_request_timeout(deadline, 10))
                 try:
                     data = res.json()
                 except Exception:
@@ -990,6 +1021,46 @@ def _cleanup_global_procs():
 
 atexit.register(_cleanup_global_procs)
 
+MIN_CAPTURE_BYTES = 250_000
+
+
+def preserve_rejected_capture(filepath):
+    """Discard header-only outputs and keep larger candidates out of the publish path."""
+    if not filepath or not os.path.isfile(filepath):
+        return
+    try:
+        if os.path.getsize(filepath) < MIN_CAPTURE_BYTES:
+            os.remove(filepath)
+            return
+        recovery_root = os.path.join(os.path.dirname(os.path.abspath(filepath)), ".capture-recovery")
+        os.makedirs(recovery_root, exist_ok=True)
+        attempt = tempfile.mkdtemp(dir=recovery_root)
+        preserved = os.path.join(attempt, os.path.basename(filepath))
+        os.replace(filepath, preserved)
+        print(f"[!] Đã giữ bản ghi chưa đạt kiểm tra để phục hồi: {preserved}")
+    except OSError as error:
+        print(f"[!] Không thể chuyển bản ghi lỗi sang thư mục phục hồi: {error}")
+
+
+def _repair_rejected_capture(filepath):
+    from auto_h264 import ensure_h264, validate_playable_video
+
+    if os.path.getsize(filepath) < MIN_CAPTURE_BYTES:
+        return None
+    try:
+        with tempfile.TemporaryDirectory(prefix=".repair-", dir=os.path.dirname(os.path.abspath(filepath))) as recovery:
+            candidate = os.path.join(recovery, os.path.basename(filepath))
+            shutil.copyfile(filepath, candidate)
+            repaired = ensure_h264(candidate)
+            valid, _, duration = validate_playable_video(repaired, min_duration=5.0, min_size_bytes=MIN_CAPTURE_BYTES)
+            if valid and duration >= 5.0:
+                os.replace(repaired, filepath)
+                return duration
+    except (OSError, RuntimeError, ValueError) as error:
+        print(f"[!] Không phục hồi được bản ghi: {type(error).__name__}")
+    return None
+
+
 def record_stream_ffmpeg(stream_url, output_filename=None, target_user: Optional[str] = None, duration=None, stop_event=None, auto_sync_gdrive=True, is_sub_only: bool = False, allow_audio_only: bool = False):
     """
     Records a live stream URL to an MP4 file using ffmpeg without re-encoding,
@@ -1003,6 +1074,7 @@ def record_stream_ffmpeg(stream_url, output_filename=None, target_user: Optional
         duration = cfg.get("max_recording_seconds", 3600)
 
     target_user_str = target_user or "streamer"
+    tag = f"[@{target_user}] " if target_user else ""
     now_str = get_now_str("%Y-%m-%d_%H-%M-%S")
     if not output_filename:
         user_dir = os.path.join(BASE_DIR, target_user_str)
@@ -1016,6 +1088,12 @@ def record_stream_ffmpeg(stream_url, output_filename=None, target_user: Optional
             os.makedirs(os.path.dirname(os.path.abspath(output_filename)), exist_ok=True)
         except OSError:
             pass
+
+    if os.path.isfile(output_filename) and os.path.getsize(output_filename) >= MIN_CAPTURE_BYTES:
+        preserve_rejected_capture(output_filename)
+        if os.path.exists(output_filename):
+            print(f"[!] Bỏ qua lần thử để giữ bản ghi đang có: {output_filename}")
+            return None
 
     print(f"\n[+] Đang chuẩn bị file ghi hình: {os.path.basename(output_filename)}")
     print(f"[+] Thư mục đích: {os.path.dirname(os.path.abspath(output_filename))}")
@@ -1220,7 +1298,6 @@ def record_stream_ffmpeg(stream_url, output_filename=None, target_user: Optional
                     _safe_stop_ffmpeg(proc, timeout=6)
                     break
 
-            tag = f"[@{target_user}] " if target_user else ""
             sys.stdout.write(f"\r🔴 {tag}Đang ghi hình: [{hours:02d}:{mins:02d}:{secs:02d}] - Dung lượng: {size_mb:.2f} MB")
             sys.stdout.flush()
 
@@ -1238,7 +1315,11 @@ def record_stream_ffmpeg(stream_url, output_filename=None, target_user: Optional
 
     if os.path.exists(output_filename):
         from auto_h264 import validate_playable_video
-        is_valid, reason, dur = validate_playable_video(output_filename, min_duration=5.0, min_size_bytes=250000)
+        is_valid, reason, dur = validate_playable_video(output_filename, min_duration=5.0, min_size_bytes=MIN_CAPTURE_BYTES)
+        repaired_duration = None if is_valid else _repair_rejected_capture(output_filename)
+        if repaired_duration is not None:
+            is_valid, dur = True, repaired_duration
+            print(f"[✓] {tag}Phục hồi bản ghi sau lỗi kiểm tra ({reason}): {os.path.basename(output_filename)}")
         if is_valid:
             final_size = os.path.getsize(output_filename) / (1024 * 1024)
             print(f"\n[✓] Ghi hình thành công! File đạt chuẩn ({dur:.1f}s, {final_size:.2f} MB):")
@@ -1247,20 +1328,17 @@ def record_stream_ffmpeg(stream_url, output_filename=None, target_user: Optional
             # Tự động kiểm tra và chuyển sang H.264 nếu cần thiết, và upscale lên 1080p nếu được yêu cầu
             try:
                 from auto_h264 import ensure_h264, upscale_to_1080p_if_needed
-                output_filename = ensure_h264(output_filename)
+                if repaired_duration is None:
+                    output_filename = ensure_h264(output_filename)
                 output_filename = upscale_to_1080p_if_needed(output_filename)
             except Exception as e:
                 print(f"[!] Lỗi khi tự động kiểm tra định dạng H.264 / upscale: {e}")
 
             # Validate lại sau khi chuyển đổi định dạng
-            is_valid_after, reason_after, _ = validate_playable_video(output_filename, min_duration=5.0, min_size_bytes=250000)
+            is_valid_after, reason_after, _ = validate_playable_video(output_filename, min_duration=5.0, min_size_bytes=MIN_CAPTURE_BYTES)
             if not is_valid_after:
-                print(f"[!] File sau khi chuyển mã không đạt chuẩn ({reason_after}). Hủy file lỗi.")
-                if os.path.exists(output_filename):
-                    try:
-                        os.remove(output_filename)
-                    except Exception:
-                        pass
+                print(f"[!] {tag}File sau khi chuyển mã không đạt chuẩn ({reason_after}): {os.path.basename(output_filename)}")
+                preserve_rejected_capture(output_filename)
                 return None
 
             # Tự động gửi thông báo Telegram & đồng bộ Google Drive nếu được yêu cầu
@@ -1281,14 +1359,11 @@ def record_stream_ffmpeg(stream_url, output_filename=None, target_user: Optional
 
             return output_filename
         else:
-            print(f"\n[!] Video ghi hình không đạt chuẩn ({reason}). Tự động hủy file lỗi để tránh rác ổ cứng và ngăn gửi video 0:00s.")
-            try:
-                os.remove(output_filename)
-            except Exception:
-                pass
+            print(f"\n[!] {tag}Video ghi hình không đạt chuẩn ({reason}): {os.path.basename(output_filename)}")
+            preserve_rejected_capture(output_filename)
             return None
     else:
-        print("\n[!] Stream ngắt hoặc không nhận được dữ liệu hợp lệ.")
+        print(f"\n[!] {tag}Stream ngắt hoặc không nhận được dữ liệu hợp lệ: {os.path.basename(output_filename)}")
         return None
 
 def concat_mp4_segments(segment_files, output_file):

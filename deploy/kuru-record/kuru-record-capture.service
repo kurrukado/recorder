@@ -1,0 +1,21 @@
+[Unit]
+Description=Kuru Record live discovery and capture
+Wants=network-online.target
+After=network-online.target
+RequiresMountsFor=/var/lib/kuru-record
+
+[Service]
+User=kuru-record
+Group=kuru-record
+WorkingDirectory=/opt/kuru-record
+EnvironmentFile=/etc/kuru-record/capture.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/kuru-record/.venv/bin/python record_worker.py --spool /var/lib/kuru-record --max-streams ${RECORD_MAX_STREAMS}
+Restart=on-failure
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=40
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

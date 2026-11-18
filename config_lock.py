@@ -122,7 +122,7 @@ def config_transaction(timeout=LOCK_TIMEOUT_SECONDS):
 _LOCKS_DIR = os.path.join(BASE_DIR, ".locks")
 
 @contextlib.contextmanager
-def streamer_recording_lock(user: str):
+def streamer_recording_lock(user: str, *, locks_dir=None):
     """
     Khóa file liên tiến trình độc quyền cho từng streamer.
     Ngăn chặn tuyệt đối tình trạng api_server và cloud_daemon (hoặc 2 worker)
@@ -134,12 +134,13 @@ def streamer_recording_lock(user: str):
         yield False
         return
 
+    lock_directory = locks_dir or _LOCKS_DIR
     try:
-        os.makedirs(_LOCKS_DIR, exist_ok=True)
+        os.makedirs(lock_directory, exist_ok=True)
     except Exception:
         pass
 
-    lock_file = os.path.join(_LOCKS_DIR, f"{user_clean}.recording.lock")
+    lock_file = os.path.join(lock_directory, f"{user_clean}.recording.lock")
     fd = None
     locked = False
     try:

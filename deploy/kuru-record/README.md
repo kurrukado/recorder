@@ -1,0 +1,32 @@
+# Vận hành Kuru Record trên worker thường trực
+
+## Chuẩn bị
+
+1. Dùng Linux có ổ SSD bền vững tại `/var/lib/kuru-record`. Đặt mã Recorder tại `/opt/kuru-record`, tạo `.venv`, cài `requirements.txt` và thêm `ffmpeg`, `ffprobe` vào `PATH`. Tạo tài khoản hệ thống `kuru-record` có quyền ghi spool và đọc cấu hình cần thiết. Dùng cùng một spool cho capture và media.
+2. Sao lưu cơ sở dữ liệu rồi áp dụng `database/recording-enabled.sql` trong `web-truyen` nếu còn thiếu. Áp dụng bản mới nhất của `database/record-worker.sql` trước khi cập nhật worker và web. Migration dùng lại các bảng và RPC hiện có, thêm chỉ mục lịch sử và xếp job R2 cùng giao dịch công bố metadata. Xác nhận `record_worker_jobs` và `tiktok_streamers` có trong publication `supabase_realtime`.
+3. Tạo bucket R2 riêng, tắt truy cập công khai. Chạy `npx wrangler r2 bucket lifecycle add record-media recordings-14d recordings/ --expire-days 14 --abort-multipart-days 7` với tên bucket của môi trường. Trong `workers/record-media/wrangler.toml`, đặt tên bucket dưới binding `RECORDINGS`. Từ thư mục đó, chạy `npx wrangler secret put RECORD_MEDIA_SIGNING_SECRET` rồi `npx wrangler deploy`.
+4. Cài ba tệp `.service` vào `/etc/systemd/system/`. Đặt biến môi trường bên dưới tại `/etc/kuru-record/`, giới hạn quyền đọc các tệp secret. Chạy `systemctl daemon-reload`. Định tuyến `RECORD_PREVIEW_ORIGIN` qua HTTPS đến `127.0.0.1:8011` của máy worker. Dùng một tiến trình preview để giữ giới hạn chung hai relay. Tắt access log của reverse proxy cho đường dẫn có token `/live/`.
+
+| Nơi đặt | Biến môi trường |
+| --- | --- |
+| `capture.env` | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `RECORD_WORKER_MODE=shadow`, `RECORD_WORKER_CANARY` (username cách nhau bằng dấu phẩy), `RECORD_MAX_STREAMS=4` lúc đo. Dùng cấu hình TikTok hiện có nếu cần. |
+| `media.env` | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GDRIVE_REFRESH_TOKEN`, `RECORD_R2_ENDPOINT` (S3 HTTPS), `RECORD_R2_BUCKET`, `RECORD_R2_ACCESS_KEY_ID`, `RECORD_R2_SECRET_ACCESS_KEY`. Có thể bật `RECORD_MEDIA_UPSCALE=1` để upscale khi máy đủ tài nguyên và hàng đợi hậu kỳ trống. |
+| `preview.env` | `RECORD_MEDIA_SIGNING_SECRET`, `RECORD_PREVIEW_ALLOWED_ORIGIN` (origin của web, cách nhau bằng dấu phẩy nếu có nhiều môi trường). |
+| Next.js phía server | `RECORD_PIN`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `RECORD_MEDIA_SIGNING_SECRET`, `RECORD_MEDIA_ORIGIN`, `RECORD_PREVIEW_ORIGIN`, `RECORD_WORKER_ENABLED`, `RECORD_MEDIA_ENABLED`. Dùng cùng khóa ký ngẫu nhiên ít nhất 32 byte trên Next.js, Worker phát R2 và dịch vụ preview. |
+| Next.js lúc build | `NEXT_PUBLIC_RECORD_WORKER_ENABLED` cho thêm streamer và live preview, `NEXT_PUBLIC_RECORD_MEDIA_ENABLED` cho tải và phát bản ghi. Đặt cùng giá trị với cờ server tương ứng và build lại khi đổi. |
+| Render, GitHub Actions | `RECORD_CONTROL_ONLY=1` trên Render và trên các Recorder API khác khi canary. Biến repository `RECORD_WORKER_MODE` và `RECORD_WORKER_CANARY` điều khiển lịch ghi cũ trong GitHub Actions. |
+
+## Chuyển đổi và đo tải
+
+- Chạy `kuru-record-capture` ở `shadow` để chỉ dò và ghi log. Giữ các cờ web ở `0`. Dùng `journalctl -u kuru-record-capture`, `-u kuru-record-media` và `-u kuru-record-preview` để xem tình trạng từng dịch vụ.
+- Sang `canary`, đồng bộ danh sách giữa GitHub và worker. Để lượt ghi cũ đang chạy chốt hoặc hủy có kiểm soát trước khi bật capture canary. Đưa Render và các API Recorder về control-only. Bật media và preview, đặt `RECORD_WORKER_MODE=canary` trong `capture.env`, rồi khởi động lại capture để đọc cờ mới. Bật cờ web trong môi trường canary và thử với nhóm streamer và bản ghi đã chọn trong 48 giờ.
+- Đo 4 luồng 1080p rồi tăng 2 mỗi lần, tối thiểu 60 phút mỗi mức, có upload và preview. Từ lúc bắt đầu phép đo, ghi journal của `kuru-record-capture` và `kuru-record-media` vào `/tmp/kuru-record-bench.log` bằng `journalctl -f --since now -o cat -u kuru-record-capture -u kuru-record-media > /tmp/kuru-record-bench.log`. Ở phiên shell khác chạy `.venv/bin/python deploy/kuru-record/measure.py --spool /var/lib/kuru-record --minutes 60 --latency-log /tmp/kuru-record-bench.log`. Báo cáo đếm mẫu và p95 cho ba mốc thêm streamer đến khung hình đầu, chốt phần đến khi hiện trong lịch sử, và hiện trong lịch sử đến khi R2 tải được. Một mốc có số mẫu bằng 0 cần thử lại trước khi kết luận.
+- Chọn mức CPU p95 dưới 75%, RAM cao nhất dưới 75%, ổ đĩa cao nhất dưới 80%, và hàng đợi Drive rút hết sau tải. Mốc thêm streamer đến khung hình đầu có p95 tối đa 15 giây khi nguồn truy cập được và còn slot. Ghi số mẫu vào kết quả canary cùng phiên bản FFmpeg, tốc độ mạng và cấu hình máy.
+- Kiểm tra nguồn gốc 1080p, 29,97/60 FPS, VFR và HEVC. Thử mất mạng, offline thật, khởi động lại, lỗi Drive/R2 và bấm tải lặp. So sánh đoạn nguồn với MP4 ở đầu, cuối và quanh reconnect nếu thấy video xám. Xác nhận buổi 3 giờ ra một tệp, 7 giờ ra hai tệp, tua trên Chrome/Safari và phục hồi bản R2 đã hết hạn.
+- Khi đạt các tiêu chí, kết thúc lượt ghi cũ rồi đặt `RECORD_WORKER_MODE=active` ở GitHub và worker. Để quay lại capture cũ, dừng capture trước, chuyển mode GitHub về cũ, gỡ `RECORD_CONTROL_ONLY` nếu dùng Recorder API cũ và tắt hai cờ `RECORD_WORKER_ENABLED`. Giữ media service, hai cờ `RECORD_MEDIA_ENABLED` và bucket riêng để tiếp tục truy cập các bản lưu Drive của worker.
+
+## Khi quá tải hoặc mất kết nối
+
+- Từ 80% dung lượng hoặc khi thiếu chỗ ghép, worker giữ các đoạn nguồn, chờ cấp slot mới và ưu tiên hoàn tất bản lưu Drive. Từ 90% worker có thể chốt mềm từng luồng mới nhất nếu ổ tiếp tục đầy. Worker cấp slot lại dưới 75% khi có đủ chỗ dự phòng. Nếu hàng đợi hậu kỳ vẫn thiếu chỗ, tăng volume cloud để worker ghép và upload các phần đã chốt.
+- Khi R2 lỗi, video đã lưu Drive vẫn có mặt trong lịch sử. Xem log `archive_published` và `cache_ready` để phân biệt sự cố lưu trữ và sự cố tải hoặc preview. Giữ SSD với các tác vụ chưa lưu xong khi thay máy worker.
+- Khi Realtime ngắt, worker quay về polling 2 giây. Khi Realtime đã kết nối, worker vẫn đối soát hàng đợi mỗi 10 giây và danh sách streamer mỗi 60 giây.

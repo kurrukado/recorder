@@ -1,5 +1,13 @@
 # Recorder - 24/7 Auto Stream Recorder
 
+## Chạy với Render Free
+
+`render.yaml` chạy một tiến trình API trên Render Free với `RECORD_CONTROL_ONLY=1`. GitHub Actions chạy lịch ghi và hậu kỳ. Video lưu trên Google Drive, còn danh sách và trạng thái đồng bộ qua Supabase. Nếu dịch vụ Render được tạo thủ công, đặt `RECORD_CONTROL_ONLY=1` trong mục Environment và dùng `/api/health` làm Health Check Path.
+
+Giữ các cờ `RECORD_WORKER_ENABLED`, `RECORD_MEDIA_ENABLED` và các cờ `NEXT_PUBLIC_` tương ứng ở `0` cho cấu hình GitHub Actions + Drive. GitHub có thể chạy lịch trễ. Render Free có thể ngủ khi ít người dùng, trang web vẫn đọc danh sách và lịch sử từ Supabase.
+
+Khi cần triển khai máy ghi thường trực có ổ đĩa bền vững, xem [hướng dẫn worker cloud](deploy/kuru-record/README.md).
+
 > [!IMPORTANT]
 > This was completely made by AI so it will cause unexpected bugs but i will commit fixes if its happen, it may takes times
 
@@ -7,7 +15,7 @@
 
 ## 🚀 Key Features
 * Streamer monitoring, live detection (~5–25s tuỳ số streamer & slot trống), H.264 stream capture, Google Drive storage, Supabase sync, and web dashboard management
-* ☁️ **100% Cloud-Native 24/7 Operation:** Runs continuously via GitHub Actions Continuous Relay and fallback cron (`*/50 * * * *`). Supports recording up to **10 concurrent streamers** for free (unlimited runner minutes on public repositories).
+* ☁️ **Cloud recording:** GitHub Actions runs the recording relay with a fallback schedule at minutes `17` and `47` each hour.
 * ⚡ **Instant Web Failover & Realtime Sync:** Web API automatically switches to Supabase Cloud in < 50ms when local instances are offline. Realtime WebSocket events push live/recording status changes to the frontend in < 100ms.
 * ⚡ **Add-While-Live Fast Path:** Streamer vừa thêm được phát hiện riêng bằng Fast-Poll 5 giây (không phải chờ hết vòng quét ~20s) và được kiểm tra live **đầu tiên** trong hàng đợi → bật ghi hình trong ~5–8s khi runner đang chạy.
 * 🗑️ **Full Storage Cleanup:** Deleting a streamer purges all records and thumbnails in `covers/record-thumbnails/{user}/` on Supabase Storage. Deleting a video removes both the Google Drive file and its Supabase thumbnail.

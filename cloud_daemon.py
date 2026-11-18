@@ -25,6 +25,7 @@ import recorder_core
 import gdrive_manager
 import notifier
 import supabase_sync
+from record_worker_mode import capture_mode, worker_owns_capture
 
 # ponytail: centralized in recorder_core to break circular dependency with staging_queue
 concat_mp4_segments = recorder_core.concat_mp4_segments
@@ -522,10 +523,7 @@ def streamer_recording_worker(user, initial_room_id, auto_discover=True, stop_ev
                         if is_valid:
                             break
                         else:
-                            try:
-                                os.remove(rec_result)
-                            except Exception:
-                                pass
+                            recorder_core.preserve_rejected_capture(rec_result)
                             if len(stream_candidates) > cand_idx + 1:
                                 log(f"[⚠️] [@{user}] Luồng #{cand_idx+1} không đạt chuẩn ({v_reason}). Tự động fallback sang luồng dự phòng #{cand_idx+2}...")
 
@@ -595,11 +593,7 @@ def streamer_recording_worker(user, initial_room_id, auto_discover=True, stop_ev
                 else:
                     consecutive_failures += 1
                     log(f"[!] [@{user}] Phân đoạn {len(part_segments)+1} không đạt chuẩn ({v_reason}).")
-                    if rec_result and os.path.exists(rec_result):
-                        try:
-                            os.remove(rec_result)
-                        except Exception:
-                            pass
+                    recorder_core.preserve_rejected_capture(rec_result)
                     if consecutive_failures >= max_consecutive_failures:
                         log(f"⏸️ [@{user}] Gặp {consecutive_failures} lỗi thu luồng liên tiếp. Dừng tích lũy Phần {part_number}.")
                         break
@@ -736,11 +730,7 @@ def streamer_recording_worker(user, initial_room_id, auto_discover=True, stop_ev
             is_valid, v_reason, final_dur = validate_playable_video(final_rec_file, min_duration=5.0, min_size_bytes=250000)
             if not is_valid:
                 log(f"[!] [@{user}] File Phần {part_number} không đạt chuẩn ({v_reason}). Bỏ qua.")
-                if final_rec_file and os.path.exists(final_rec_file):
-                    try:
-                        os.remove(final_rec_file)
-                    except Exception:
-                        pass
+                recorder_core.preserve_rejected_capture(final_rec_file)
                 consecutive_failures += 1
                 if consecutive_failures >= max_consecutive_failures:
                     log(f"⏸️ [@{user}] Gặp {consecutive_failures} lỗi tạo video liên tiếp. Dừng luồng ghi hình.")
@@ -1014,6 +1004,9 @@ def streamer_recording_worker(user, initial_room_id, auto_discover=True, stop_ev
 
 def run_daemon(max_minutes=210, interval=25, auto_discover=True):
     global _CACHED_DRIVE_USERS
+    if capture_mode() == "active":
+        log("Ghi hình đã chuyển sang worker thường trực.")
+        return
     start_time = time.time()
     max_seconds = max_minutes * 60
     # Giai đoạn DRAIN: ngưng khởi động luồng mới, chờ luồng đang ghi chốt + upload.
@@ -1209,6 +1202,7 @@ def run_daemon(max_minutes=210, interval=25, auto_discover=True):
             u for u in users
             if _RECORDING_PREFERENCES_READY and u not in _PAUSED_USERS
             and u not in active_set and u not in drive_busy_users and u not in _SESSION_SKIP_USERS
+            and not worker_owns_capture(u)
         ]
 
         if (not draining) and users_to_check:
@@ -1225,165 +1219,163 @@ def run_daemon(max_minutes=210, interval=25, auto_discover=True):
                 except Exception:
                     return u, {"is_live": False, "room_id": None, "is_account_deleted": False}
 
-            # Quét đa luồng thông minh (16 workers) giúp kiểm tra toàn bộ 70+ streamer trong < 10 giây
+            # Xử lý kết quả khi tới lượt để giữ thứ tự ưu tiên khi cấp slot ghi hình.
             with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(users_to_check), 16)) as executor:
-                check_results = list(executor.map(_check, users_to_check))
+                for user, det in executor.map(_check, users_to_check):
+                    if not isinstance(det, dict):
+                        continue
 
-            for user, det in check_results:
-                if not isinstance(det, dict):
-                    continue
-
-                # 1. Tự động cập nhật khi streamer đổi username (@)
-                new_username = det.get("new_username")
-                if new_username and new_username != user:
-                    log(f"🔄 [@{user}] Phát hiện đổi username thành @{new_username}. Đang tự động cập nhật hệ thống...")
-                    try:
-                        supabase_sync.rename_streamer_supabase(user, new_username)
-                        cfg = load_config()
-                        if "monitored_users" in cfg and isinstance(cfg["monitored_users"], list):
-                            cfg["monitored_users"] = [
-                                new_username if str(x).strip().replace("@", "").lower() == user else x
-                                for x in cfg["monitored_users"]
-                            ]
-                            save_config(cfg)
-                        with _CONFIG_USERS_LOCK:
-                            if _CACHED_DRIVE_USERS is not None:
-                                _CACHED_DRIVE_USERS = [
-                                    new_username if x == user else x
-                                    for x in _CACHED_DRIVE_USERS
+                    # 1. Tự động cập nhật khi streamer đổi username (@)
+                    new_username = det.get("new_username")
+                    if new_username and new_username != user:
+                        log(f"🔄 [@{user}] Phát hiện đổi username thành @{new_username}. Đang tự động cập nhật hệ thống...")
+                        try:
+                            supabase_sync.rename_streamer_supabase(user, new_username)
+                            cfg = load_config()
+                            if "monitored_users" in cfg and isinstance(cfg["monitored_users"], list):
+                                cfg["monitored_users"] = [
+                                    new_username if str(x).strip().replace("@", "").lower() == user else x
+                                    for x in cfg["monitored_users"]
                                 ]
-                                try:
-                                    gdrive_manager.save_streamers_to_drive(_CACHED_DRIVE_USERS)
-                                except Exception:
-                                    pass
-                        notifier.send_telegram(
-                            f"🔄 <b>ĐỔI USERNAME TIKTOK:</b>\n"
-                            f"Streamer <code>@{user}</code> đã đổi tên thành <code>@{new_username}</code>.\n"
-                            f"Hệ thống đã tự động cập nhật cơ sở dữ liệu và tiếp tục theo dõi 24/7!"
-                        )
-                        user = new_username
-                    except Exception as ren_err:
-                        log(f"[!] Lỗi khi tự động đổi tên @{user} -> @{new_username}: {ren_err}")
+                                save_config(cfg)
+                            with _CONFIG_USERS_LOCK:
+                                if _CACHED_DRIVE_USERS is not None:
+                                    _CACHED_DRIVE_USERS = [
+                                        new_username if x == user else x
+                                        for x in _CACHED_DRIVE_USERS
+                                    ]
+                                    try:
+                                        gdrive_manager.save_streamers_to_drive(_CACHED_DRIVE_USERS)
+                                    except Exception:
+                                        pass
+                            notifier.send_telegram(
+                                f"🔄 <b>ĐỔI USERNAME TIKTOK:</b>\n"
+                                f"Streamer <code>@{user}</code> đã đổi tên thành <code>@{new_username}</code>.\n"
+                                f"Hệ thống đã tự động cập nhật cơ sở dữ liệu và tiếp tục theo dõi 24/7!"
+                            )
+                            user = new_username
+                        except Exception as ren_err:
+                            log(f"[!] Lỗi khi tự động đổi tên @{user} -> @{new_username}: {ren_err}")
 
-                # 2. Xử lý tài khoản bị xóa thật
-                if det.get("is_account_deleted"):
-                    log(f"⚠️ [@{user}] Phát hiện tài khoản TikTok đã bị xóa / không tồn tại. Đánh dấu 'deleted' trên Supabase...")
-                    try:
-                        supabase_sync.update_streamer_status_supabase(
-                            user,
-                            is_account_deleted=True,
-                            status="deleted",
-                            is_live=False,
-                            is_recording=False
-                        )
-                    except Exception:
-                        pass
-                    continue
-                else:
-                    # 3. Tự động phục hồi tài khoản bị đánh dấu 'deleted' nhầm
-                    if user in _DELETED_IN_DB_SET:
-                        log(f"✅ [@{user}] Tài khoản TikTok hoạt động bình thường! Tự động khôi phục từ 'deleted' về 'offline' trên Supabase...")
+                    # 2. Xử lý tài khoản bị xóa thật
+                    if det.get("is_account_deleted"):
+                        log(f"⚠️ [@{user}] Phát hiện tài khoản TikTok đã bị xóa / không tồn tại. Đánh dấu 'deleted' trên Supabase...")
                         try:
                             supabase_sync.update_streamer_status_supabase(
                                 user,
-                                is_account_deleted=False,
-                                status="offline"
+                                is_account_deleted=True,
+                                status="deleted",
+                                is_live=False,
+                                is_recording=False
                             )
-                            _DELETED_IN_DB_SET.discard(user)
                         except Exception:
                             pass
+                        continue
+                    else:
+                        # 3. Tự động phục hồi tài khoản bị đánh dấu 'deleted' nhầm
+                        if user in _DELETED_IN_DB_SET:
+                            log(f"✅ [@{user}] Tài khoản TikTok hoạt động bình thường! Tự động khôi phục từ 'deleted' về 'offline' trên Supabase...")
+                            try:
+                                supabase_sync.update_streamer_status_supabase(
+                                    user,
+                                    is_account_deleted=False,
+                                    status="offline"
+                                )
+                                _DELETED_IN_DB_SET.discard(user)
+                            except Exception:
+                                pass
 
-                is_live = det.get("is_live", False)
-                room_id = det.get("room_id")
-                if not (is_live and room_id):
-                    if user in _SUPA_LIVE_IN_DB_SET and user not in active_set:
+                    is_live = det.get("is_live", False)
+                    room_id = det.get("room_id")
+                    if not (is_live and room_id):
+                        if user in _SUPA_LIVE_IN_DB_SET and user not in active_set:
+                            try:
+                                supabase_sync.update_streamer_status_supabase(
+                                    user, is_live=False, is_recording=False, status="offline"
+                                )
+                                _SUPA_LIVE_IN_DB_SET.discard(user)
+                            except Exception:
+                                pass
+                        continue
+
+                    _SUPA_LIVE_IN_DB_SET.add(user)
+
+                    # Nếu hết slot ghi hình, cập nhật trạng thái LIVE lên Supabase để web hiển thị 🟢 LIVE 24/7
+                    with RECORDERS_LOCK:
+                        current_slots_left = MAX_CONCURRENT_RECORDERS - len(ACTIVE_RECORDERS)
+                    if current_slots_left <= 0:
                         try:
                             supabase_sync.update_streamer_status_supabase(
-                                user, is_live=False, is_recording=False, status="offline"
+                                user,
+                                is_live=True,
+                                is_recording=False,
+                                room_id=room_id,
+                                nickname=det.get("nickname"),
+                                avatar_thumb=det.get("avatar_thumb"),
+                                status="live"
                             )
-                            _SUPA_LIVE_IN_DB_SET.discard(user)
                         except Exception:
                             pass
-                    continue
-
-                _SUPA_LIVE_IN_DB_SET.add(user)
-
-                # Nếu hết slot ghi hình, cập nhật trạng thái LIVE lên Supabase để web hiển thị 🟢 LIVE 24/7
-                with RECORDERS_LOCK:
-                    current_slots_left = MAX_CONCURRENT_RECORDERS - len(ACTIVE_RECORDERS)
-                if current_slots_left <= 0:
-                    try:
-                        supabase_sync.update_streamer_status_supabase(
-                            user,
-                            is_live=True,
-                            is_recording=False,
-                            room_id=room_id,
-                            nickname=det.get("nickname"),
-                            avatar_thumb=det.get("avatar_thumb"),
-                            status="live"
-                        )
-                    except Exception:
-                        pass
-                    continue
-
-                # Chống lặp khởi động lại vô hạn (và gửi Telegram mỗi vòng).
-                # Backoff lũy tiến: mỗi phiên thất bại liên tiếp nhân đôi thời gian chờ.
-                last_start = _USER_START_COOLDOWN.get(user, 0.0)
-                since_start = time.time() - last_start
-                streak = _USER_FAILURE_STREAK.get(user, 0)
-                backoff_mult = 2 ** max(0, streak - 1)
-                required_cooldown = min(USER_START_COOLDOWN_SECONDS * backoff_mult, MAX_START_COOLDOWN_SECONDS)
-                if last_start and since_start < required_cooldown:
-                    log(f"⏳ [@{user}] Luồng vừa khởi động {int(since_start)}s trước mà đã tắt. "
-                        f"Chờ {int(required_cooldown - since_start)}s nữa mới khởi động lại "
-                        f"(chống lặp, backoff x{backoff_mult}).")
-                    try:
-                        supabase_sync.update_streamer_status_supabase(
-                            user,
-                            is_live=True,
-                            is_recording=False,
-                            room_id=room_id,
-                            nickname=det.get("nickname"),
-                            avatar_thumb=det.get("avatar_thumb"),
-                            status="live"
-                        )
-                    except Exception:
-                        pass
-                    continue
-
-                stop_ev = threading.Event()
-                t = threading.Thread(
-                    target=streamer_recording_worker,
-                    args=(user, room_id, auto_discover, stop_ev),
-                    daemon=True
-                )
-                with RECORDERS_LOCK:
-                    if (not _RECORDING_PREFERENCES_READY or user in _PAUSED_USERS
-                            or user in ACTIVE_RECORDERS or len(ACTIVE_RECORDERS) >= MAX_CONCURRENT_RECORDERS):
                         continue
-                    ACTIVE_RECORDERS[user] = {
-                        "thread": t,
-                        "start_time": time.time(),
-                        "stop_event": stop_ev
-                    }
-                _USER_START_COOLDOWN[user] = time.time()
-                # Đồng bộ ngay lập tức lên Supabase để web nhận tín hiệu REC < 100ms
-                try:
-                    supabase_sync.update_streamer_status_supabase(
-                        user,
-                        is_live=True,
-                        is_recording=True,
-                        room_id=room_id,
-                        nickname=det.get("nickname"),
-                        avatar_thumb=det.get("avatar_thumb"),
-                        status="recording"
+
+                    # Chống lặp khởi động lại vô hạn (và gửi Telegram mỗi vòng).
+                    # Backoff lũy tiến: mỗi phiên thất bại liên tiếp nhân đôi thời gian chờ.
+                    last_start = _USER_START_COOLDOWN.get(user, 0.0)
+                    since_start = time.time() - last_start
+                    streak = _USER_FAILURE_STREAK.get(user, 0)
+                    backoff_mult = 2 ** max(0, streak - 1)
+                    required_cooldown = min(USER_START_COOLDOWN_SECONDS * backoff_mult, MAX_START_COOLDOWN_SECONDS)
+                    if last_start and since_start < required_cooldown:
+                        log(f"⏳ [@{user}] Luồng vừa khởi động {int(since_start)}s trước mà đã tắt. "
+                            f"Chờ {int(required_cooldown - since_start)}s nữa mới khởi động lại "
+                            f"(chống lặp, backoff x{backoff_mult}).")
+                        try:
+                            supabase_sync.update_streamer_status_supabase(
+                                user,
+                                is_live=True,
+                                is_recording=False,
+                                room_id=room_id,
+                                nickname=det.get("nickname"),
+                                avatar_thumb=det.get("avatar_thumb"),
+                                status="live"
+                            )
+                        except Exception:
+                            pass
+                        continue
+
+                    stop_ev = threading.Event()
+                    t = threading.Thread(
+                        target=streamer_recording_worker,
+                        args=(user, room_id, auto_discover, stop_ev),
+                        daemon=True
                     )
-                except Exception:
-                    pass
-                log(f"🔴 PHÁT HIỆN LIVESTREAM: @{user} đang trực tiếp (Room ID: {room_id})")
-                notifier.send_telegram(f"🔴 <b>STREAMER ĐANG LIVE!</b>\n👤 <code>@{user}</code> bắt đầu phát livestream.\nĐang tự động ghi hình đa luồng HD H.264 (< 2 tiếng/phần)...")
-                t.start()
-                time.sleep(0.5)
+                    with RECORDERS_LOCK:
+                        if (not _RECORDING_PREFERENCES_READY or user in _PAUSED_USERS
+                                or user in ACTIVE_RECORDERS or len(ACTIVE_RECORDERS) >= MAX_CONCURRENT_RECORDERS):
+                            continue
+                        ACTIVE_RECORDERS[user] = {
+                            "thread": t,
+                            "start_time": time.time(),
+                            "stop_event": stop_ev
+                        }
+                    _USER_START_COOLDOWN[user] = time.time()
+                    # Đồng bộ ngay lập tức lên Supabase để web nhận tín hiệu REC < 100ms
+                    try:
+                        supabase_sync.update_streamer_status_supabase(
+                            user,
+                            is_live=True,
+                            is_recording=True,
+                            room_id=room_id,
+                            nickname=det.get("nickname"),
+                            avatar_thumb=det.get("avatar_thumb"),
+                            status="recording"
+                        )
+                    except Exception:
+                        pass
+                    log(f"🔴 PHÁT HIỆN LIVESTREAM: @{user} đang trực tiếp (Room ID: {room_id})")
+                    notifier.send_telegram(f"🔴 <b>STREAMER ĐANG LIVE!</b>\n👤 <code>@{user}</code> bắt đầu phát livestream.\nĐang tự động ghi hình đa luồng HD H.264 (< 2 tiếng/phần)...")
+                    t.start()
+                    time.sleep(0.5)
 
         # Smart Jitter Delay để tránh bị TikTok chặn tần suất.
         # Ngủ theo từng lát FAST_POLL_SECONDS: nếu có streamer vừa được thêm trên

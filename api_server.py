@@ -141,8 +141,21 @@ def _extract_pin(request: Request) -> str:
         return auth[7:].strip()
     return ""
 
+
+def control_only():
+    return os.getenv("RECORD_CONTROL_ONLY") == "1"
+
+
 @app.middleware("http")
 async def enforce_pin_on_mutations(request: Request, call_next):
+    if control_only():
+        path = request.url.path.rstrip("/")
+        if (request.method == "POST" and path in ("/api/users", "/api/record", "/api/record/start", "/api/record/stop",
+                                                   "/api/gdrive/sync", "/api/recordings/sync-supabase")) or (
+            request.method in ("GET", "HEAD") and (path == "/api/recordings"
+                or path.startswith(("/api/test-live/", "/api/stream-video/")))
+        ):
+            return JSONResponse(status_code=409, content={"detail": "Tác vụ ghi và xử lý video chạy trên worker đám mây"})
     # Preflight CORS phải đi thẳng vào CORSMiddleware (nằm phía trong).
     if request.method == "OPTIONS" or request.method not in ("POST", "PUT", "PATCH", "DELETE"):
         return await call_next(request)
@@ -419,11 +432,12 @@ def health_check():
 @app.get("/api/status")
 def status_check():
     active = set()
-    try:
-        drive_act = gdrive_manager.load_active_recordings_from_drive() or []
-        active.update(drive_act)
-    except Exception:
-        pass
+    if not control_only():
+        try:
+            drive_act = gdrive_manager.load_active_recordings_from_drive() or []
+            active.update(drive_act)
+        except Exception:
+            pass
     try:
         supa_act = supabase_sync.get_active_recordings_from_supabase() or []
         active.update(supa_act)
@@ -446,6 +460,12 @@ def get_active_recordings():
     Trả về danh sách chính xác các streamer hiện đang được bot ghi hình thực sự.
     Tự động dọn dẹp các streamer kẹt trạng thái ma (Zombie Recording).
     """
+    if control_only():
+        users = get_users()["users"]
+        active = [user["username"] for user in users if user.get("is_recording")]
+        live = [user["username"] for user in users if user.get("is_live")]
+        return {"total_active": len(active), "active_streamers": active, "live_streamers": live,
+                "total_live": len(live), "status": "recording" if active else "idle"}
     try:
         clean_zombie_recordings()
     except Exception:
@@ -491,6 +511,13 @@ def get_active_recordings():
 
 @app.get("/api/users")
 def get_users(check_live: bool = True, fresh: bool = False):
+    if control_only():
+        users = supabase_sync.fetch_streamers_details_from_supabase()
+        if users is None:
+            raise HTTPException(503, "Không tải được danh sách streamer")
+        return {"ok": True, "status": "online", "mode": "control_only", "total": len(users), "users": users,
+                "streamers": [user["username"] for user in users],
+                "currently_recording": [user["username"] for user in users if user.get("is_recording")]}
     try:
         # 1. Nguồn dữ liệu số 1: Supabase Database (đồng bộ tức thì từ Web)
         supa_users = []

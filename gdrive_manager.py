@@ -1,3 +1,4 @@
+import hashlib
 import os
 import sys
 import json
@@ -202,7 +203,14 @@ def find_folder(folder_name, parent_id=None, access_token=None):
     """
     return find_or_create_folder(folder_name, parent_id=parent_id, access_token=access_token, create=False)
 
-def upload_file_to_drive(file_path, parent_folder_id, access_token=None):
+def drive_file_checksum(path):
+    digest = hashlib.md5(usedforsecurity=False)
+    with open(path, "rb") as file:
+        for chunk in iter(lambda: file.read(1024**2), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+def upload_file_to_drive(file_path, parent_folder_id, access_token=None, *, public=True, min_video_bytes=250 * 1024):
     if not access_token:
         access_token = get_access_token()
     if not access_token:
@@ -219,7 +227,7 @@ def upload_file_to_drive(file_path, parent_folder_id, access_token=None):
     file_size_mb = file_size / (1024 * 1024)
 
     # Chặn tải lên các file video MP4 dung lượng rác lỗi 0:00s
-    if file_name.lower().endswith(".mp4") and file_size < 250 * 1024:
+    if file_name.lower().endswith(".mp4") and file_size < min_video_bytes:
         print(f"  [!] Từ chối tải file MP4 lỗi 0:00s / dung lượng quá nhỏ ({file_size} bytes): {file_name}")
         return False
 
@@ -228,7 +236,7 @@ def upload_file_to_drive(file_path, parent_folder_id, access_token=None):
     # Check if file already exists in this folder
     safe_file_name = file_name.replace("\\", "\\\\").replace("'", "\\'")
     q = f"name = '{safe_file_name}' and '{parent_folder_id}' in parents and trashed = false"
-    check_url = f"https://www.googleapis.com/drive/v3/files?q={requests.utils.quote(q)}&fields=files(id,size)"
+    check_url = f"https://www.googleapis.com/drive/v3/files?q={requests.utils.quote(q)}&fields=files(id,size,md5Checksum)"
     try:
         c_res = requests.get(check_url, headers=headers, timeout=15)
         if c_res.status_code == 200:
@@ -236,16 +244,26 @@ def upload_file_to_drive(file_path, parent_folder_id, access_token=None):
             if existing:
                 drive_sz = int(existing[0].get("size", 0))
                 if drive_sz == file_size:
+                    if not public and existing[0].get("md5Checksum") != drive_file_checksum(file_path):
+                        print(f"  [!] File lưu trữ trùng tên nhưng nội dung khác: {file_name}")
+                        return False
                     print(f"  [-] File đã tồn tại toàn vẹn trên Drive: {file_name} ({file_size_mb:.2f} MB), bỏ qua.")
                     return existing[0].get("id") or False
-                else:
+                elif public:
                     print(f"  [!] Phát hiện file dở dang trên Drive ({drive_sz} != {file_size} bytes). Đang xóa để tải lại toàn vẹn...")
                     try:
                         requests.delete(f"https://www.googleapis.com/drive/v3/files/{existing[0]['id']}", headers=headers, timeout=10)
                     except Exception:
                         pass
+                else:
+                    print(f"  [!] Tên file lưu trữ đã tồn tại với dung lượng khác: {file_name}")
+                    return False
+        elif not public:
+            print(f"  [!] Không xác minh được file lưu trữ trên Drive (mã {c_res.status_code}): {file_name}")
+            return False
     except Exception:
-        pass
+        if not public:
+            return False
 
     init_url = "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable"
     mime_type = "image/jpeg" if file_name.lower().endswith((".jpg", ".jpeg")) else "video/mp4"
@@ -390,10 +408,11 @@ def upload_file_to_drive(file_path, parent_folder_id, access_token=None):
             pass
 
         if f_id:
-            try:
-                make_file_public(f_id, access_token=access_token)
-            except Exception:
-                pass
+            if public:
+                try:
+                    make_file_public(f_id, access_token=access_token)
+                except Exception:
+                    pass
             return f_id
 
         # Fallback: nếu response không có id, truy vấn lại Drive theo tên file vừa upload
@@ -405,10 +424,11 @@ def upload_file_to_drive(file_path, parent_folder_id, access_token=None):
                 v_files = v_res.json().get("files", [])
                 if v_files and v_files[0].get("id"):
                     v_id = v_files[0].get("id")
-                    try:
-                        make_file_public(v_id, access_token=access_token)
-                    except Exception:
-                        pass
+                    if public:
+                        try:
+                            make_file_public(v_id, access_token=access_token)
+                        except Exception:
+                            pass
                     return v_id
         except Exception:
             pass

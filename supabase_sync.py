@@ -268,6 +268,7 @@ def upload_thumbnail_to_supabase(*args, **kwargs) -> Optional[str]:
     thumb_source = kwargs.get("thumb_source")
     user = kwargs.get("user")
     filename = kwargs.get("filename")
+    auth_key = kwargs.get("auth_key", SUPABASE_KEY)
 
     if len(args) == 3:
         thumb_source, user, filename = args[0], args[1], args[2]
@@ -322,11 +323,12 @@ def upload_thumbnail_to_supabase(*args, **kwargs) -> Optional[str]:
             return None
 
         headers = {
-            "apikey": SUPABASE_KEY,
-            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "apikey": auth_key,
             "Content-Type": "image/jpeg",
             "x-upsert": "true"
         }
+        if not auth_key.startswith("sb_secret_"):
+            headers["Authorization"] = f"Bearer {auth_key}"
 
         for attempt in range(3):
             res = None

@@ -3,7 +3,7 @@ name: Recorder 24-7 Auto Recorder
 on:
   workflow_dispatch:
   schedule:
-    - cron: '*/50 * * * *'
+    - cron: '17,47 * * * *'
 
 concurrency:
   group: recorder-runner
@@ -18,6 +18,7 @@ permissions:
 
 jobs:
   run-recorder:
+    if: vars.RECORD_WORKER_MODE != 'active'
     runs-on: ubuntu-24.04
     timeout-minutes: 210
 
@@ -80,6 +81,8 @@ jobs:
 
       - name: Run TikTok 24-7 Recorder
         env:
+          RECORD_WORKER_MODE: ${{ vars.RECORD_WORKER_MODE }}
+          RECORD_WORKER_CANARY: ${{ vars.RECORD_WORKER_CANARY }}
           TZ: 'Asia/Ho_Chi_Minh'
           TZ_OFFSET_HOURS: '7'
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -102,7 +105,7 @@ jobs:
           set -Eeuo pipefail
 
           if [ -z "${WORKFLOW_TOKEN:-}" ]; then
-            echo "::notice::Không có Personal Access Token (WORKFLOW_PAT/GH_PAT). Cron schedule sẽ tự động kích hoạt phiên kế tiếp sau mỗi 50 phút."
+            echo "::notice::Không có Personal Access Token (WORKFLOW_PAT/GH_PAT). Lượt ghi dự phòng được lên lịch mỗi 30 phút."
             exit 0
           fi
 
@@ -142,5 +145,5 @@ jobs:
           if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
             echo "::notice::[✓] Đã kích hoạt lượt ghi hình tiếp theo thành công (HTTP $http_code)!"
           else
-            echo "::notice::GitHub API trả về mã $http_code. Cron schedule (mỗi 50 phút) sẽ tự động tiếp quản phiên mới."
+            echo "::notice::GitHub API trả về mã $http_code. Lượt ghi dự phòng được lên lịch mỗi 30 phút."
           fi

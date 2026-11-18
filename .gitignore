@@ -52,6 +52,10 @@ test_*_user/
 # Tests & Test Runners (Excluded from GitHub repository)
 test_*.py
 !test_recording_controls.py
+!test_record_worker.py
+!test_record_live_preview.py
+!test_record_disk.py
+!test_record_worker_media.py
 test_*.mjs
 *_test.py
 quick_api_test.py
