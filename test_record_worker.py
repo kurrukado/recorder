@@ -408,6 +408,13 @@ class DiskAdmissionTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RealtimePollingTests(unittest.IsolatedAsyncioTestCase):
+    def test_realtime_jwt_override_keeps_sb_secret_rest_calls(self):
+        db = Database(object(), "https://db.invalid", "sb_secret_fixture", "legacy.jwt")
+        self.assertEqual(db.headers, {"apikey": "sb_secret_fixture", "Authorization": "Bearer legacy.jwt"})
+        self.assertEqual(db.jwt, "legacy.jwt")
+        self.assertIsNone(Database(object(), "https://db.invalid", "sb_secret_fixture").jwt)
+        self.assertEqual(Database(object(), "https://db.invalid", "legacy.key").jwt, "legacy.key")
+
     async def test_realtime_requires_join_ack_before_using_healthy_intervals(self):
         class Socket:
             def __init__(self):

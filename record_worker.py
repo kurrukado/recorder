@@ -427,11 +427,13 @@ def spool_lock(spool):
 
 
 class Database:
-    def __init__(self, session, url, key):
+    def __init__(self, session, url, key, realtime_jwt=None):
         self.session = session
         self.url = url
         self.key = key
-        self.jwt = None if key.startswith("sb_secret_") else key
+        # sb_secret_ keys are not JWTs: Realtime would fall back to the anon role and be
+        # denied on record_worker_jobs (RLS without policies), silently dropping CDC.
+        self.jwt = realtime_jwt or (None if key.startswith("sb_secret_") else key)
         self.headers = {"apikey": key}
         if self.jwt:
             self.headers["Authorization"] = f"Bearer {self.jwt}"
@@ -1151,8 +1153,13 @@ async def sleep_or_stop(event, seconds):
 
 async def run(args, allowlist, url, key):
     timeout = aiohttp.ClientTimeout(total=8)
+    realtime_jwt = (os.getenv("SUPABASE_REALTIME_JWT") or "").strip() or None
+    if key.startswith("sb_secret_") and not realtime_jwt:
+        LOG.warning("SUPABASE_SERVICE_ROLE_KEY is an sb_secret_ key and SUPABASE_REALTIME_JWT is unset: "
+                    "Realtime CDC will fall back to 2s polling. Set SUPABASE_REALTIME_JWT to the legacy "
+                    "service_role JWT to keep the 10s/60s cadence.")
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        worker = Worker(Database(session, url, key), args.spool, args.mode, allowlist, args.max_streams)
+        worker = Worker(Database(session, url, key, realtime_jwt), args.spool, args.mode, allowlist, args.max_streams)
 
         def stop(*_):
             worker.stopping.set()

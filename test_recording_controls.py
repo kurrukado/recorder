@@ -84,6 +84,32 @@ class RecordingControlsTests(unittest.TestCase):
             self.assertEqual(response.json()["stream_url"], "https://media.invalid/live.m3u8")
             capture.assert_not_called()
 
+    def test_control_only_blocks_deletes_and_fails_closed_without_pin(self):
+        import api_server
+        from fastapi.testclient import TestClient
+
+        with patch.dict(os.environ, {"RECORD_CONTROL_ONLY": "1", "RECORD_PIN": "fixture"}, clear=False):
+            client = TestClient(api_server.app)
+            self.assertEqual(client.delete("/api/users/alice", headers={"x-record-pin": "fixture"}).status_code, 409)
+            self.assertEqual(client.delete("/api/recordings", headers={"x-record-pin": "fixture"}).status_code, 409)
+
+        with patch.dict(os.environ, {"RECORD_CONTROL_ONLY": "1", "RECORD_PIN": ""}, clear=False), \
+                patch.object(api_server, "get_api_pin", return_value=""):
+            client = TestClient(api_server.app)
+            response = client.put("/api/users/alice", json={"recording_enabled": False})
+            self.assertEqual(response.status_code, 503)
+            self.assertEqual(response.json()["status"], "pin_required")
+
+    def test_render_environment_is_guarded_without_control_flag(self):
+        import api_server
+        with patch.dict(os.environ, {"RENDER": "true", "RECORD_CONTROL_ONLY": ""}, clear=False):
+            self.assertTrue(api_server.guarded_runtime())
+            from fastapi.testclient import TestClient
+            client = TestClient(api_server.app)
+            self.assertEqual(client.delete("/api/recordings").status_code, 409)
+        with patch.dict(os.environ, {"RENDER": "", "RECORD_CONTROL_ONLY": ""}, clear=False):
+            self.assertFalse(api_server.guarded_runtime())
+
     def test_render_health_never_waits_for_cloud_dependencies(self):
         import api_server
         from fastapi.testclient import TestClient

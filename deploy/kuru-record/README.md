@@ -3,18 +3,18 @@
 ## Chuẩn bị
 
 1. Dùng Linux có ổ SSD bền vững tại `/var/lib/kuru-record`. Đặt mã Recorder tại `/opt/kuru-record`, tạo `.venv`, cài `requirements.txt` và thêm `ffmpeg`, `ffprobe` vào `PATH`. Tạo tài khoản hệ thống `kuru-record` có quyền ghi spool và đọc cấu hình cần thiết. Dùng cùng một spool cho capture và media.
-2. Sao lưu cơ sở dữ liệu rồi áp dụng `database/recording-enabled.sql` trong `web-truyen` nếu còn thiếu. Áp dụng bản mới nhất của `database/record-worker.sql` trước khi cập nhật worker và web. Migration dùng lại các bảng và RPC hiện có, thêm chỉ mục lịch sử và xếp job R2 cùng giao dịch công bố metadata. Xác nhận `record_worker_jobs` và `tiktok_streamers` có trong publication `supabase_realtime`.
+2. Sao lưu cơ sở dữ liệu rồi áp dụng `database/recording-enabled.sql` trong `web-truyen` nếu còn thiếu. Áp dụng bản mới nhất của `database/record-worker.sql` trước khi cập nhật worker và web. Migration dùng lại các bảng và RPC hiện có, thêm chỉ mục lịch sử và **không còn tự đẩy video lên R2 khi publish**: R2 chỉ được nạp khi có người xem hoặc tải lần đầu, nên phải áp dụng lại file này cho mọi môi trường đã cài bản cũ. Xác nhận `record_worker_jobs`, `tiktok_streamers` và `tiktok_recordings` có trong publication `supabase_realtime`.
 3. Tạo bucket R2 riêng, tắt truy cập công khai. Chạy `npx wrangler r2 bucket lifecycle add record-media recordings-14d recordings/ --expire-days 14 --abort-multipart-days 7` với tên bucket của môi trường. Trong `workers/record-media/wrangler.toml`, đặt tên bucket dưới binding `RECORDINGS`. Từ thư mục đó, chạy `npx wrangler secret put RECORD_MEDIA_SIGNING_SECRET` rồi `npx wrangler deploy`.
 4. Cài ba tệp `.service` vào `/etc/systemd/system/`. Đặt biến môi trường bên dưới tại `/etc/kuru-record/`, giới hạn quyền đọc các tệp secret. Chạy `systemctl daemon-reload`. Định tuyến `RECORD_PREVIEW_ORIGIN` qua HTTPS đến `127.0.0.1:8011` của máy worker. Dùng một tiến trình preview để giữ giới hạn chung hai relay. Tắt access log của reverse proxy cho đường dẫn có token `/live/`.
 
 | Nơi đặt | Biến môi trường |
 | --- | --- |
-| `capture.env` | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `RECORD_WORKER_MODE=shadow`, `RECORD_WORKER_CANARY` (username cách nhau bằng dấu phẩy), `RECORD_MAX_STREAMS=4` lúc đo. Dùng cấu hình TikTok hiện có nếu cần. |
+| `capture.env` | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `RECORD_WORKER_MODE=shadow`, `RECORD_WORKER_CANARY` (username cách nhau bằng dấu phẩy), `RECORD_MAX_STREAMS=4` lúc đo. Nếu khóa là `sb_secret_...` (không phải JWT) thì đặt thêm `SUPABASE_REALTIME_JWT` bằng service_role JWT cũ, nếu không Realtime sẽ bị từ chối và worker tự tụt về polling 2 giây. Dùng cấu hình TikTok hiện có nếu cần. |
 | `media.env` | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GDRIVE_REFRESH_TOKEN`, `RECORD_R2_ENDPOINT` (S3 HTTPS), `RECORD_R2_BUCKET`, `RECORD_R2_ACCESS_KEY_ID`, `RECORD_R2_SECRET_ACCESS_KEY`. Có thể bật `RECORD_MEDIA_UPSCALE=1` để upscale khi máy đủ tài nguyên và hàng đợi hậu kỳ trống. |
 | `preview.env` | `RECORD_MEDIA_SIGNING_SECRET`, `RECORD_PREVIEW_ALLOWED_ORIGIN` (origin của web, cách nhau bằng dấu phẩy nếu có nhiều môi trường). |
 | Next.js phía server | `RECORD_PIN`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `RECORD_MEDIA_SIGNING_SECRET`, `RECORD_MEDIA_ORIGIN`, `RECORD_PREVIEW_ORIGIN`, `RECORD_WORKER_ENABLED`, `RECORD_MEDIA_ENABLED`. Dùng cùng khóa ký ngẫu nhiên ít nhất 32 byte trên Next.js, Worker phát R2 và dịch vụ preview. |
 | Next.js lúc build | `NEXT_PUBLIC_RECORD_WORKER_ENABLED` cho thêm streamer và live preview, `NEXT_PUBLIC_RECORD_MEDIA_ENABLED` cho tải và phát bản ghi. Đặt cùng giá trị với cờ server tương ứng và build lại khi đổi. |
-| Render, GitHub Actions | `RECORD_CONTROL_ONLY=1` trên Render và trên các Recorder API khác khi canary. Biến repository `RECORD_WORKER_MODE` và `RECORD_WORKER_CANARY` điều khiển lịch ghi cũ trong GitHub Actions. |
+| Render, GitHub Actions | `RECORD_CONTROL_ONLY=1` và `RECORD_PIN` trên Render (service free có URL công khai; thiếu PIN thì API từ chối mọi thao tác thay đổi dữ liệu và chặn cả DELETE). Biến repository `RECORD_WORKER_MODE` và `RECORD_WORKER_CANARY` điều khiển lịch ghi cũ trong GitHub Actions. |
 
 ## Chuyển đổi và đo tải
 
