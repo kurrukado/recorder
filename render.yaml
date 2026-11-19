@@ -11,6 +11,7 @@ services:
         value: 3.11.0
       - key: RECORD_CONTROL_ONLY
         value: '1'
-      # Bắt buộc: service free có URL công khai, không có PIN thì API từ chối mọi mutation.
+      # Tuỳ chọn nhưng nên đặt: service free có URL công khai. Chưa đặt thì API
+      # điều khiển chạy không mật khẩu (vẫn chặn ghi hình/media).
       - key: RECORD_PIN
         sync: false

@@ -84,8 +84,8 @@ async def lifespan(app: FastAPI):
     if get_api_pin():
         print("[🔐] Đã BẬT xác thực PIN cho mọi endpoint POST/PUT/PATCH/DELETE.")
     elif guarded_runtime():
-        print("[🛑] RECORD_PIN chưa được cấu hình: API sẽ TỪ CHỐI mọi thao tác thay đổi dữ liệu "
-              "(Render/control-only). Đặt RECORD_PIN trong Environment để bật điều khiển từ xa.")
+        print('[⚠️] RECORD_PIN chưa được cấu hình: API điều khiển chạy KHÔNG mật khẩu '
+              '(chỉ chặn ghi hình/media trên Render). Đặt RECORD_PIN trong Environment để bật xác thực.')
     else:
         print('[⚠️] Chưa bật PIN cho API: mọi POST/DELETE đều công khai nếu expose ra Internet. '
               'Đặt biến môi trường RECORD_PIN (hoặc khóa "api_pin" trong config.json) để bật xác thực.')
@@ -170,39 +170,39 @@ def _cors_headers(request: Request):
     }
 
 
+def guarded_blocks_write(method: str, path: str) -> bool:
+    """Control-only/Render không ghi hình và không phục vụ media, nhưng vẫn cho
+    điều khiển metadata (thêm/xoá streamer, xoá bản ghi)."""
+    if not guarded_runtime():
+        return False
+    path = path.rstrip("/")
+    if method == "POST" and path in ("/api/record", "/api/record/start", "/api/record/stop",
+                                     "/api/gdrive/sync", "/api/recordings/sync-supabase"):
+        return True
+    return method in ("GET", "HEAD") and (path == "/api/recordings"
+        or path.startswith(("/api/test-live/", "/api/stream-video/")))
+
+
 @app.middleware("http")
 async def enforce_pin_on_mutations(request: Request, call_next):
-    if guarded_runtime():
-        path = request.url.path.rstrip("/")
-        if request.method == "DELETE" or (
-            request.method == "POST" and path in ("/api/users", "/api/record", "/api/record/start", "/api/record/stop",
-                                                  "/api/gdrive/sync", "/api/recordings/sync-supabase")) or (
-            request.method in ("GET", "HEAD") and (path == "/api/recordings"
-                or path.startswith(("/api/test-live/", "/api/stream-video/")))
-        ):
-            return JSONResponse(
-                status_code=409,
-                content={"detail": "Tác vụ ghi, xóa và xử lý video chạy trên worker đám mây"},
-                headers=_cors_headers(request),
-            )
+    if guarded_blocks_write(request.method, request.url.path):
+        return JSONResponse(
+            status_code=409,
+            content={"detail": "Tác vụ ghi và xử lý video chạy trên worker đám mây"},
+            headers=_cors_headers(request),
+        )
     # Preflight CORS phải đi thẳng vào CORSMiddleware (nằm phía trong).
     if request.method == "OPTIONS" or request.method not in ("POST", "PUT", "PATCH", "DELETE"):
         return await call_next(request)
 
     required = get_api_pin()
     if not required:
-        # Thà từ chối còn hơn mở toang mutation trên URL công khai (Render Free).
-        if guarded_runtime():
-            return JSONResponse(
-                status_code=503,
-                content={"detail": "Chưa cấu hình RECORD_PIN; API từ chối thay đổi dữ liệu",
-                         "status": "pin_required"},
-                headers=_cors_headers(request),
-            )
+        # PIN là tuỳ chọn: chưa cấu hình thì giữ hành vi cũ (không auth),
+        # để Record vẫn thêm/xoá được. Cấu hình rồi thì luôn kiểm tra.
         return await call_next(request)
     if _extract_pin(request) != required:
         # Middleware này chạy NGOÀI CORSMiddleware -> tự gắn header CORS,
-        # nếu không trình duyệt sẽ báo lỗi CORS thay vì 401.
+        # nếu không trình duyệt báo lỗi CORS thay vì 401.
         return JSONResponse(
             status_code=401,
             content={"detail": "PIN không hợp lệ hoặc thiếu header x-record-pin", "status": "unauthorized"},
