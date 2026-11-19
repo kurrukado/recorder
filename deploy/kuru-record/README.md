@@ -14,7 +14,7 @@
 | `preview.env` | `RECORD_MEDIA_SIGNING_SECRET`, `RECORD_PREVIEW_ALLOWED_ORIGIN` (origin của web, cách nhau bằng dấu phẩy nếu có nhiều môi trường). |
 | Next.js phía server | `RECORD_PIN`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `RECORD_MEDIA_SIGNING_SECRET`, `RECORD_MEDIA_ORIGIN`, `RECORD_PREVIEW_ORIGIN`, `RECORD_WORKER_ENABLED`, `RECORD_MEDIA_ENABLED`. Dùng cùng khóa ký ngẫu nhiên ít nhất 32 byte trên Next.js, Worker phát R2 và dịch vụ preview. |
 | Next.js lúc build | `NEXT_PUBLIC_RECORD_WORKER_ENABLED` cho thêm streamer và live preview, `NEXT_PUBLIC_RECORD_MEDIA_ENABLED` cho tải và phát bản ghi. Đặt cùng giá trị với cờ server tương ứng và build lại khi đổi. |
-| Render, GitHub Actions | `RECORD_CONTROL_ONLY=1` và `RECORD_PIN` trên Render (service free có URL công khai; PIN là tuỳ chọn nhưng nên đặt — chưa đặt thì API điều khiển chạy không mật khẩu, dù vẫn chặn ghi hình/media). Biến repository `RECORD_WORKER_MODE` và `RECORD_WORKER_CANARY` điều khiển lịch ghi cũ trong GitHub Actions. |
+| Render, GitHub Actions | `RECORD_CONTROL_ONLY=1` và `RECORD_PIN` trên Render (service free có URL công khai; PIN là tuỳ chọn nhưng nên đặt, cùng giá trị với Vercel — chưa đặt thì API điều khiển chạy không mật khẩu, dù vẫn chặn ghi hình/media). Trên web, PIN chỉ chặn lúc vào Record: nhập đúng một lần rồi dùng cookie phiên. Biến repository `RECORD_WORKER_MODE` và `RECORD_WORKER_CANARY` điều khiển lịch ghi cũ trong GitHub Actions. |
 
 ## Chuyển đổi và đo tải
 
