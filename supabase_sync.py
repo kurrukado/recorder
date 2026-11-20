@@ -621,3 +621,49 @@ def delete_thumbnails_from_supabase(user: str, filenames: Union[list, str]) -> b
         return False
 
 
+def delete_recordings_from_supabase(user: str, filenames: Union[list, str]) -> bool:
+    """
+    Xóa danh sách bản ghi video lẻ đã được gộp khỏi bảng 'tiktok_recordings'
+    (chia lô tối đa 50 filename mỗi request) và dọn thumbnail tương ứng trong Storage 'covers'.
+    """
+    user = str(user or "").strip().replace("@", "").lower()
+    if isinstance(filenames, str):
+        filenames = [filenames]
+    if not filenames or not isinstance(filenames, (list, tuple, set)):
+        return False
+
+    clean_list = list(dict.fromkeys(
+        str(fn).strip() for fn in filenames if fn and str(fn).strip()
+    ))
+    if not clean_list:
+        return True
+
+    try:
+        headers = get_supabase_headers("application/json")
+        all_ok = True
+        chunk_size = 50  # AGENTS.md: Chia .in() tối đa 50 ID mỗi lô
+
+        for i in range(0, len(clean_list), chunk_size):
+            chunk = clean_list[i:i + chunk_size]
+            encoded_items = ",".join(
+                requests.utils.quote(f'"{fn.replace(chr(34), "")}"', safe="")
+                for fn in chunk
+            )
+            del_url = f"{SUPABASE_URL}/rest/v1/tiktok_recordings?filename=in.({encoded_items})"
+            with requests.delete(del_url, headers=headers, timeout=15) as res:
+                if res.status_code in (200, 204):
+                    print(f"[SUPABASE-SYNC] [✓] Đã xóa {len(chunk)} bản ghi cũ của @{user} trong tiktok_recordings")
+                else:
+                    print(f"[SUPABASE-SYNC] [!] Lỗi xóa bản ghi cũ tiktok_recordings ({res.status_code}): {res.text}")
+                    all_ok = False
+
+        if user:
+            delete_thumbnails_from_supabase(user, clean_list)
+
+        return all_ok
+    except Exception as e:
+        print(f"[SUPABASE-SYNC] [!] Ngoại lệ khi xóa danh sách bản ghi cũ trên Supabase: {e}")
+        return False
+
+
+

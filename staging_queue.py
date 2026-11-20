@@ -10,9 +10,11 @@ staging_queue.py - Hệ thống Hàng đợi Đệm Cloud Staging Queue (Google 
 """
 
 import os
+import re
 import time
 import json
 import shutil
+import subprocess
 import requests
 import threading
 from datetime import datetime
@@ -184,6 +186,8 @@ def save_staging_manifest(user: str, user_staging_id: str, manifest_data: dict, 
         "last_live_time": manifest_data.get("last_live_time", int(time.time())),
         "updated_at": int(time.time())
     }
+    if manifest_data.get("force_merge"):
+        payload["force_merge"] = True
     content_bytes = json.dumps(payload, indent=2, ensure_ascii=False).encode("utf-8")
 
     try:
@@ -322,6 +326,61 @@ def add_to_staging_queue(user: str, local_file_path: str, duration_seconds: floa
     finally:
         lock.release()
 
+def _normalize_segment_resolutions(segment_files: list, merge_dir: str) -> list:
+    """
+    Chuẩn hóa các phân đoạn lệch độ phân giải về độ phân giải của phân đoạn đầu tiên
+    trước khi chạy concat -c copy để tránh khung xám / vỡ macroblock.
+    """
+    if len(segment_files) < 2:
+        return segment_files
+    try:
+        from auto_h264 import get_video_resolution
+    except Exception:
+        return segment_files
+
+    resolutions = []
+    for seg in segment_files:
+        try:
+            w, h, _ = get_video_resolution(seg)
+        except Exception:
+            w, h = None, None
+        resolutions.append((w, h) if (w and h and w > 0 and h > 0) else None)
+
+    ref = next((r for r in resolutions if r is not None), None)
+    if not ref or all(r is None or r == ref for r in resolutions):
+        return segment_files
+
+    ref_w, ref_h = ref
+    ffmpeg_bin = getattr(recorder_core, "FFMPEG_PATH", "ffmpeg") or "ffmpeg"
+    normalized = []
+    for idx, (seg, res) in enumerate(zip(segment_files, resolutions)):
+        if res is None or res == ref:
+            normalized.append(seg)
+            continue
+        norm_path = os.path.join(merge_dir, f"_norm_{idx}_{os.path.basename(seg)}")
+        _log(
+            f"[Normalize] Chuẩn hóa {os.path.basename(seg)} từ {res[0]}x{res[1]} -> {ref_w}x{ref_h} để ghép nối không lỗi khung hình..."
+        )
+        cmd = [
+            ffmpeg_bin, "-y",
+            "-i", seg,
+            "-vf", f"scale={ref_w}:{ref_h}:force_original_aspect_ratio=decrease,pad={ref_w}:{ref_h}:(ow-iw)/2:(oh-ih)/2,setsar=1",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-ar", "44100", "-ac", "2",
+            "-movflags", "+faststart",
+            norm_path,
+        ]
+        try:
+            proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=600)
+            if proc.returncode == 0 and os.path.exists(norm_path) and os.path.getsize(norm_path) > 50000:
+                normalized.append(norm_path)
+                continue
+        except Exception as norm_err:
+            _log(f"[!] Lỗi chuẩn hóa độ phân giải {os.path.basename(seg)}: {norm_err}")
+        normalized.append(seg)
+    return normalized
+
+
 def package_and_publish_queue(user: str, access_token: str = None) -> dict:
     """
     Gom tất cả các video trong Staging Queue của streamer:
@@ -418,10 +477,34 @@ def package_and_publish_queue(user: str, access_token: str = None) -> dict:
                 if not local_segment_files:
                     return {"ok": False, "error": "Không có phân đoạn hợp lệ để ghép nối"}
 
-                # Xác định tên file đầu ra theo thời gian của phân đoạn đầu tiên
+                force_merge = bool(manifest.get("force_merge", False))
+                if force_merge and len(segments) >= 2 and len(local_segment_files) < len(segments):
+                    return {
+                        "ok": False,
+                        "error": f"Chỉ tải được {len(local_segment_files)}/{len(segments)} phân đoạn để gộp, giữ nguyên hàng đợi để thử lại"
+                    }
+
+                # Xác định tên file đầu ra theo thời gian của phân đoạn đầu tiên, tránh trùng tên đầu vào
                 first_seg_fn = os.path.basename(local_segment_files[0])
-                first_base = os.path.splitext(first_seg_fn)[0].replace("_part1", "").replace("_seg1", "")
-                final_output_file = os.path.join(os.path.join(BASE_DIR, user), f"{first_base}_full.mp4")
+                raw_base = os.path.splitext(first_seg_fn)[0]
+                first_base = re.sub(
+                    r'(?:_part\d+|_p\d+|_seg\d+|_full|_merged(?:_\d+)?)+$',
+                    '',
+                    raw_base,
+                    flags=re.IGNORECASE,
+                ) or raw_base
+                all_input_names = set(merged_filenames) | {
+                    s.get("filename") for s in segments if s.get("filename")
+                }
+                out_name = f"{first_base}_full.mp4"
+                if out_name in all_input_names:
+                    out_name = f"{first_base}_merged.mp4"
+                if out_name in all_input_names:
+                    out_name = f"{first_base}_merged_{int(time.time()) % 10000}.mp4"
+                final_output_file = os.path.join(os.path.join(BASE_DIR, user), out_name)
+
+                if len(local_segment_files) > 1:
+                    local_segment_files = _normalize_segment_resolutions(local_segment_files, merge_dir)
 
                 # Ghép nối
                 if len(local_segment_files) == 1:
@@ -482,12 +565,20 @@ def package_and_publish_queue(user: str, access_token: str = None) -> dict:
                 sz_bytes = os.path.getsize(final_output_file)
                 fn_basename = os.path.basename(final_output_file)
                 drive_file_id = up_ok if isinstance(up_ok, str) else None
+                first_seg_meta = next(
+                    (s for s in segments if s.get("filename") == first_seg_fn),
+                    segments[0] if segments else {},
+                )
+                first_recorded_at = first_seg_meta.get("recorded_at_iso") if isinstance(first_seg_meta.get("recorded_at_iso"), str) else None
+                first_created_at = first_seg_meta.get("created_at_iso") if isinstance(first_seg_meta.get("created_at_iso"), str) else None
                 supabase_ok = False
                 try:
                     supabase_ok = bool(supabase_sync.sync_recording_to_supabase(
                         user=user,
                         filename=fn_basename,
                         size_bytes=sz_bytes,
+                        recorded_at=first_recorded_at,
+                        created_at=first_created_at,
                         thumb_source=thumb_f,
                         drive_file_id=drive_file_id,
                         drive_thumb_id=drive_thumb_id,
@@ -497,14 +588,30 @@ def package_and_publish_queue(user: str, access_token: str = None) -> dict:
                         _log(f"[✓] [@{user}] Đã đồng bộ video hoàn chỉnh lên Supabase Database & Storage!")
                     else:
                         _log(f"[!] [@{user}] Supabase sync THẤT BẠI sau 3 lần thử. Video đã có trên Drive "
-                             f"nhưng CHƯA có bản ghi DB (filename: {fn_basename}) — cần re-sync.")
+                             f"nhưng CHƯA có bản ghi DB (filename: {fn_basename}) — GIỮ nguyên phân đoạn gốc.")
                 except Exception as sb_err:
                     _log(f"[!] Lỗi đồng bộ Supabase: {sb_err}")
 
-                # 4. Dọn sạch các phân đoạn đã được ghép nối trong Staging Queue trên Google Drive
-                _log(f"[@{user}] Đang dọn dẹp các phân đoạn tạm trong Staging Queue trên Google Drive...")
+                if not supabase_ok:
+                    return {
+                        "ok": False,
+                        "error": f"Đồng bộ Supabase thất bại cho {fn_basename}, giữ nguyên các phân đoạn gốc trên Drive",
+                        "filename": fn_basename,
+                        "supabase_synced": False,
+                    }
+
+                # 4. Dọn sạch các phân đoạn cũ trên Google Drive và Supabase khi video gộp đã lên DB an toàn
+                _log(f"[@{user}] Đang dọn dẹp các phân đoạn cũ trên Google Drive và Supabase...")
                 for f_id in merged_file_ids:
-                    gdrive_manager.delete_file_drive(f_id, access_token=access_token)
+                    if f_id and f_id != drive_file_id:
+                        gdrive_manager.delete_file_drive(f_id, access_token=access_token)
+
+                old_db_filenames = [fn for fn in merged_filenames if fn != fn_basename]
+                if old_db_filenames:
+                    try:
+                        supabase_sync.delete_recordings_from_supabase(user, old_db_filenames)
+                    except Exception as del_sb_err:
+                        _log(f"[!] [@{user}] Lỗi dọn bản ghi phân đoạn cũ trên Supabase: {del_sb_err}")
 
                 remaining_segs = [s for s in segments if s.get("filename") not in merged_filenames]
                 if remaining_segs:
@@ -630,8 +737,16 @@ def check_and_flush_idle_queues(access_token: str = None) -> list:
 
                 last_live_time = manifest.get("last_live_time", now_ts)
                 idle_seconds = now_ts - last_live_time
+                force_merge = bool(manifest.get("force_merge", False))
 
-                # Nếu đã quá 10 phút không có phiên live mới (streamer đã offline)
+                if force_merge:
+                    _log(f"🎬 [@{user}] Nhận yêu cầu gộp video thủ công (force_merge). Bắt đầu gộp {len(segments)} phân đoạn ngay lập tức...")
+                    res_pkg = package_and_publish_queue(user, access_token=access_token)
+                    if res_pkg.get("ok"):
+                        flushed_users.append(user)
+                    continue
+
+                # Nếu đã quá 5 phút không có phiên live mới (streamer đã offline)
                 if idle_seconds >= MAX_IDLE_SECONDS:
                     # Kiểm tra lại xem streamer hiện có đang online không
                     is_live, _ = recorder_core.check_live_status(user)
