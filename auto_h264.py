@@ -1066,7 +1066,7 @@ def get_video_duration(filepath):
         pass
     return None
 
-def _extract_raw_keyframe_thumb(video_path, output_thumb):
+def _extract_raw_keyframe_thumb(video_path, output_thumb, *, scale_filter="", quality="2"):
     """
     Trích xuất trực tiếp NALU SPS/PPS/IDR từ bảng mẫu MP4 (stsz/stco),
     giải mã tức thì ra JPEG kể cả khi file MP4 chứa raw FLV sequence header (01 64 00 1f...).
@@ -1176,8 +1176,8 @@ def _extract_raw_keyframe_thumb(video_path, output_thumb):
                             "-i", raw_tmp,
                             "-vframes", "1",
                             "-strict", "unofficial",
-                            "-vf", "format=yuv420p",
-                            "-q:v", "2",
+                            "-vf", f"{scale_filter}format=yuv420p",
+                            "-q:v", quality,
                             output_thumb
                         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
                         if p.returncode == 0 and os.path.exists(output_thumb) and os.path.getsize(output_thumb) > 500:
@@ -1190,7 +1190,7 @@ def _extract_raw_keyframe_thumb(video_path, output_thumb):
         pass
     return None
 
-def extract_middle_thumbnail(video_path, output_thumb=None):
+def extract_middle_thumbnail(video_path, output_thumb=None, *, max_edge=None):
     """
     Trích xuất khung hình thumbnail chất lượng cao tại chính giữa video (hoặc keyframe hợp lệ gần nhất).
     Tự động xử lý pixel format limited range (smpte170m) và bitstream có lỗi NAL unit.
@@ -1202,6 +1202,15 @@ def extract_middle_thumbnail(video_path, output_thumb=None):
         output_thumb = base + ".jpg"
     if os.path.exists(output_thumb) and os.path.getsize(output_thumb) > 1024:
         return output_thumb
+
+    scale_filter = ""
+    quality = "2"
+    if max_edge:
+        scale_filter = (
+            f"scale=w='min({max_edge},iw)':h='min({max_edge},ih)':"
+            "force_original_aspect_ratio=decrease:force_divisible_by=2,"
+        )
+        quality = "4"
 
     duration = get_video_duration(video_path)
     seek_targets = []
@@ -1227,8 +1236,8 @@ def extract_middle_thumbnail(video_path, output_thumb=None):
             "-i", video_path,
             "-vframes", "1",
             "-strict", "unofficial",
-            "-vf", "format=yuvj420p",
-            "-q:v", "2",
+            "-vf", f"{scale_filter}format=yuvj420p",
+            "-q:v", quality,
             output_thumb
         ]
         try:
@@ -1248,8 +1257,8 @@ def extract_middle_thumbnail(video_path, output_thumb=None):
             "-ss", "00:00:01.000",
             "-vframes", "1",
             "-strict", "unofficial",
-            "-vf", "format=yuvj420p",
-            "-q:v", "2",
+            "-vf", f"{scale_filter}format=yuvj420p",
+            "-q:v", quality,
             output_thumb
         ]
         p = subprocess.run(cmd_seq, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
@@ -1260,7 +1269,7 @@ def extract_middle_thumbnail(video_path, output_thumb=None):
 
     # Fallback 2: Direct keyframe bitstream extraction
     try:
-        thumb_result = _extract_raw_keyframe_thumb(video_path, output_thumb)
+        thumb_result = _extract_raw_keyframe_thumb(video_path, output_thumb, scale_filter=scale_filter, quality=quality)
         if thumb_result and os.path.exists(thumb_result) and os.path.getsize(thumb_result) > 500:
             return thumb_result
     except Exception:

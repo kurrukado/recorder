@@ -656,7 +656,7 @@ def _finalize_job(spool, manifest, job, *, allow_upscale=False):
         )
     else:
         duration = _probe(output)[2]
-    extract_middle_thumbnail(str(output), str(output.with_suffix(".jpg")))
+    extract_middle_thumbnail(str(output), str(output.with_suffix(".jpg")), max_edge=480)
     job.update(state="finalized", attempts=0, available=0, duration_seconds=duration)
     _write_json(manifest, job)
 
